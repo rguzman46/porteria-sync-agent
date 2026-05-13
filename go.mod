@@ -1,4 +1,4 @@
-module github.com/porteriaplus/porteria-sync-agent
+module github.com/rguzman46/porteria-sync-agent
 
 go 1.22
 
