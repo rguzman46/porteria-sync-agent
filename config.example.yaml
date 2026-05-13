@@ -1,0 +1,33 @@
+# Sync Agent — config de ejemplo.
+# Copia a `config.yaml` (junto al binario) y completa los valores.
+# El binario también lee variables de entorno PORTERIA_* que sobreescriben
+# estos valores — útil para CI / Windows Service con env vars seguras.
+
+cloud:
+  # Subdominio tenant: catamaran.porteriaplus.com / oasis.porteriaplus.com / etc.
+  base_url: https://TU_CONJUNTO.porteriaplus.com
+  # Bearer token generado en /integrations → Crear dispositivo. Se muestra UNA vez.
+  # Si lo pierdes, regenéralo desde el panel (el anterior queda invalidado).
+  token: pa_PEGA_AQUI_EL_TOKEN_DEL_DEVICE
+
+camera:
+  # Vendor de la cámara. V1 soporta hikvision. dahua/axis vienen en próximo release.
+  type: hikvision
+  # IP local de la cámara (red privada del conjunto).
+  host: 192.168.1.50
+  # Puerto HTTP de la cámara (80 por default Hikvision).
+  port: 80
+  # Credenciales admin de la cámara. En firmware moderno Hikvision requiere
+  # contraseña fuerte (8+ chars, mayúsc/minúsc/dígitos).
+  user: admin
+  password: CAMBIA_ESTO
+
+poll:
+  # Cada cuántos segundos pollear al cloud. Mínimo 30. Recomendado 60.
+  interval_seconds: 60
+
+log:
+  # Ruta del log file. Si es relativo, va junto al binario.
+  file: agent.log
+  # Niveles: debug | info | warn | error
+  level: info

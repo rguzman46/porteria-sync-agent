@@ -1,0 +1,18 @@
+# Binarios compilados
+bin/
+*.exe
+
+# Config con secretos (cada instalador crea el suyo desde config.example.yaml)
+config.yaml
+
+# Logs
+*.log
+agent.log
+
+# Go module cache (generado por `go mod tidy`)
+# Se commitea go.sum cuando se haga `go mod tidy` por primera vez,
+# pero hasta entonces no existe — se ignora si está en build cache.
+
+# IDE
+.vscode/
+.idea/
