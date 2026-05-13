@@ -38,7 +38,7 @@ param(
     [string]$CameraUser = 'admin',
     [string]$CameraPassword,
     [string]$InstallDir = 'C:\PorteriaAgent',
-    [string]$BinaryUrl = 'https://github.com/porteriaplus/porteria-sync-agent/releases/latest/download/porteria-agent.exe',
+    [string]$BinaryUrl = 'https://github.com/rguzman46/porteria-sync-agent/releases/latest/download/porteria-agent.exe',
     [string]$ExpectedHash = '__EXPECTED_HASH__'
 )
 

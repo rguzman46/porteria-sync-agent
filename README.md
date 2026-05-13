@@ -145,4 +145,4 @@ Heartbeats reportan al cloud cada 60s. Si el cloud no recibe heartbeats por >2h,
 
 ## Licencia
 
-MIT (cuando se publique como repo independiente `github.com/porteriaplus/porteria-sync-agent`).
+MIT (cuando se publique como repo independiente `github.com/rguzman46/porteria-sync-agent`).

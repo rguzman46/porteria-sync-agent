@@ -1,0 +1,129 @@
+name: release
+
+# Cross-compila el sync agent a Windows/Linux/macOS y publica los binarios
+# en una GitHub Release. Trigger: push de un tag `agent-v*` (ej. `agent-v0.1.0`)
+# o `workflow_dispatch` manual (smoke testing sin tag).
+#
+# El admin del conjunto descarga el .exe desde la URL del release:
+#   https://github.com/rguzman46/porteria-sync-agent/releases/latest/download/porteria-agent.exe
+#
+# El SHA-256 del binario Windows se inyecta en `install.ps1` reemplazando
+# el placeholder `__EXPECTED_HASH__` para que el script verifique
+# integridad post-download. Sin firma de código ($300/año), el hash
+# es la mejor defensa contra binarios modificados.
+
+on:
+  push:
+    tags:
+      - 'agent-v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Cross-compile + release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Determinar versión
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/agent-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/agent-v}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Cross-compile (windows/linux/macos)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p bin
+          LDFLAGS="-s -w -X main.AgentVersion=${VERSION}"
+
+          GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/porteria-agent.exe .
+          GOOS=linux   GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/porteria-agent-linux-amd64 .
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o bin/porteria-agent-macos-arm64 .
+
+          ls -lah bin/
+
+      - name: Calcular SHA-256
+        id: hashes
+        working-directory: bin
+        run: |
+          WIN_HASH=$(sha256sum porteria-agent.exe | awk '{print $1}')
+          LINUX_HASH=$(sha256sum porteria-agent-linux-amd64 | awk '{print $1}')
+          MAC_HASH=$(sha256sum porteria-agent-macos-arm64 | awk '{print $1}')
+
+          echo "win=${WIN_HASH}" >> "$GITHUB_OUTPUT"
+          echo "linux=${LINUX_HASH}" >> "$GITHUB_OUTPUT"
+          echo "mac=${MAC_HASH}" >> "$GITHUB_OUTPUT"
+
+          cat > SHA256SUMS.txt <<EOF
+          ${WIN_HASH}  porteria-agent.exe
+          ${LINUX_HASH}  porteria-agent-linux-amd64
+          ${MAC_HASH}  porteria-agent-macos-arm64
+          EOF
+          cat SHA256SUMS.txt
+
+      - name: Inyectar SHA-256 + versión en install.ps1 + uninstall.ps1
+        env:
+          WIN_HASH: ${{ steps.hashes.outputs.win }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -e "s|__EXPECTED_HASH__|${WIN_HASH}|g" \
+              -e "s|__VERSION__|${VERSION}|g" \
+              scripts/install.ps1 > bin/install.ps1
+          sed -e "s|__VERSION__|${VERSION}|g" \
+              scripts/uninstall.ps1 > bin/uninstall.ps1
+          echo "✓ Scripts publicables generados con SHA y versión inyectados"
+
+      - name: Publicar release (sólo si es tag)
+        if: startsWith(github.ref, 'refs/tags/agent-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Sync Agent v${{ steps.version.outputs.version }}
+          body: |
+            Sync agent del Módulo LPR de Porteria Plus.
+
+            **Binarios**:
+            - Windows amd64: `porteria-agent.exe` — SHA-256 `${{ steps.hashes.outputs.win }}`
+            - Linux amd64: `porteria-agent-linux-amd64` — SHA-256 `${{ steps.hashes.outputs.linux }}`
+            - macOS arm64: `porteria-agent-macos-arm64` — SHA-256 `${{ steps.hashes.outputs.mac }}`
+
+            **Scripts** (Windows):
+            - `install.ps1` — instalación con verificación SHA-256 + AV exclusion + Service register
+            - `uninstall.ps1` — desinstalación limpia
+            - `SHA256SUMS.txt` — manifest de hashes
+
+            Ver [README](https://github.com/${{ github.repository }}#readme) para detalles de instalación.
+          files: |
+            bin/porteria-agent.exe
+            bin/porteria-agent-linux-amd64
+            bin/porteria-agent-macos-arm64
+            bin/install.ps1
+            bin/uninstall.ps1
+            bin/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+
+      - name: Subir artefactos al run (workflow_dispatch sin tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/agent-v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-agent-binaries
+          path: bin/
+          retention-days: 7
