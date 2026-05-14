@@ -95,10 +95,17 @@ func (s *Syncer) cycle(ctx context.Context) {
 	if err := s.camera.SyncWhitelist(cycleCtx, wl.Plates); err != nil {
 		log.Printf("[sync] push a cámara falló: %v", err)
 		// NO incrementar consecutiveErrors aquí — la red al cloud anda bien.
-		// El próximo ciclo reintentará (el cloud todavía marca el whitelist
-		// como modificado relativo a nuestra última Last-Modified).
+		// NO hacemos AckPending — el próximo FetchWhitelist re-pedirá el
+		// mismo whitelist (If-Modified-Since seguirá siendo el viejo
+		// acknowledged) y reintentaremos el push. Sin esta separación, el
+		// cloud responderia 304 y la cámara quedaría desincronizada hasta
+		// que algo cambiase en BD.
 		return
 	}
+
+	// Push exitoso → confirmar al cloud client que ya tenemos esta versión.
+	// Las siguientes requests usarán este Last-Modified como If-Modified-Since.
+	s.cloud.AckPending()
 	log.Printf("[sync] cámara sincronizada exitosamente")
 }
 

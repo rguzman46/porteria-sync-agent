@@ -31,3 +31,37 @@ log:
   file: agent.log
   # Niveles: debug | info | warn | error
   level: info
+
+# Receiver — captura visual del vehículo (v0.2.0+). Cuando enabled=true,
+# el agent levanta un HTTP server local en :8787 al que la cámara LPR
+# puede postear el snapshot + metadata cada vez que detecte una placa.
+# El agent encola el evento localmente y lo reenvía al cloud, sobreviviendo
+# outages de internet (queue persistente con back-off exponencial).
+#
+# Para upgrade desde v0.1.x: si esta sección NO existe en el yaml, el agent
+# corre solo como puller (whitelist+heartbeat) — comportamiento legacy.
+receiver:
+  # Habilitar la captura visual. Si false, este device queda en modo legacy
+  # texto-only (la cámara debe postear directo al cloud sin pasar por el agent).
+  enabled: true
+
+  # Dirección donde escucha el HTTP server. 0.0.0.0 = LAN-accesible (cámara
+  # en otra IP de la LAN). 127.0.0.1 = solo localhost (cámara y agent en
+  # mismo PC). Puerto 8787 por default — cambiar si conflictúa con otro servicio.
+  bind_address: 0.0.0.0:8787
+
+  # Directorio donde se persisten los eventos pendientes (queue offline).
+  # Default: <directorio del binario>/queue. Cambiar si el disco es lento o
+  # quieres aislar en otra partición.
+  queue_dir: queue
+
+  # Caps de la queue local. Si se superan, el agent descarta los eventos más
+  # antiguos (warning en log). Defaults: 10000 items / 1GB. ~12 días de
+  # outage continuo a 800 eventos/día caben sin descarte.
+  max_queue_items: 10000
+  max_queue_bytes: 1073741824
+
+  # Cada cuántos segundos el replay worker intenta drenar la queue. 30s es
+  # responsive sin spam. Subir si el cloud o el internet del conjunto son
+  # consistentemente lentos.
+  replay_tick_sec: 30

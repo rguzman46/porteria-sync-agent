@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/kardianos/service"
 )
@@ -56,13 +57,13 @@ func (p *program) run() {
 	p.cancel = cancel
 	defer cancel()
 
-	log.Printf("[main] arrancando sync agent v%s (cloud=%s, camera=%s @ %s)",
-		AgentVersion, p.cfg.Cloud.BaseURL, p.cfg.Camera.Type, p.cfg.Camera.Host)
+	log.Printf("[main] arrancando sync agent v%s (cloud=%s, camera=%s @ %s, receiver=%v)",
+		AgentVersion, p.cfg.Cloud.BaseURL, p.cfg.Camera.Type, p.cfg.Camera.Host, p.cfg.Receiver.Enabled)
 
-	// 1) Construir cliente cloud.
+	// 1) Construir cliente cloud (compartido entre syncer y replay).
 	cloud := NewCloudClient(p.cfg.Cloud.BaseURL, p.cfg.Cloud.Token)
 
-	// 2) Construir adapter de cámara.
+	// 2) Construir adapter de cámara (para whitelist push).
 	camera, err := NewCameraAdapter(p.cfg)
 	if err != nil {
 		log.Fatalf("[main] error construyendo camera adapter: %v", err)
@@ -75,7 +76,34 @@ func (p *program) run() {
 	}
 	pingCancel()
 
-	// 4) Arrancar el loop de sync.
+	// 4) Si Receiver.Enabled, arrancar HTTP receiver + replay worker en
+	// goroutines separadas. La captura visual es opt-in vía config — los
+	// agents v0.1.x existentes (sin sección `receiver:` en yaml) siguen
+	// corriendo solo como puller (whitelist + heartbeat) sin cambios.
+	if p.cfg.Receiver.Enabled {
+		queue, err := NewFileQueue(p.cfg.Receiver.QueueDir, p.cfg.Receiver.MaxQueueItems, p.cfg.Receiver.MaxQueueBytes)
+		if err != nil {
+			log.Fatalf("[main] error inicializando queue local: %v", err)
+		}
+
+		receiver := NewReceiver(p.cfg, queue)
+		go func() {
+			if err := receiver.Start(ctx); err != nil {
+				log.Printf("[main] receiver terminó con error: %v", err)
+			}
+		}()
+
+		replay := NewReplayWorker(cloud, queue, p.cfg.Receiver.ReplayTickSec)
+		go replay.Run(ctx)
+
+		items, bytes, oldest := queue.Stats()
+		log.Printf("[main] receiver+replay activos. Queue actual: items=%d bytes=%d oldest=%s",
+			items, bytes, oldest.Round(time.Second))
+	} else {
+		log.Println("[main] receiver deshabilitado (modo legacy v0.1.x — solo whitelist sync)")
+	}
+
+	// 5) Arrancar el loop de sync (whitelist + heartbeat).
 	syncer := NewSyncer(cloud, camera, p.cfg.Poll.IntervalSeconds)
 	syncer.Run(ctx)
 }

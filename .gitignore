@@ -1,6 +1,14 @@
 # Binarios compilados
 bin/
 *.exe
+porteria-sync-agent
+porteria-agent
+porteria-agent-linux
+porteria-agent-macos
+
+# Queue runtime del receiver (v0.2.0+) — datos locales del PC del portero,
+# NUNCA al repo (cada instalación genera su propia queue al recibir eventos).
+queue/
 
 # Config con secretos (cada instalador crea el suyo desde config.example.yaml)
 config.yaml

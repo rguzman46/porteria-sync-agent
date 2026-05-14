@@ -36,6 +36,19 @@ type Config struct {
 		File  string `yaml:"file"`  // logs/agent.log (relativo al binario)
 		Level string `yaml:"level"` // info | debug | warn | error
 	} `yaml:"log"`
+
+	// Receiver — HTTP server local que recibe multipart de la cámara LPR
+	// (Módulo LPR — Día 8, captura visual). La cámara postea aquí; el agent
+	// encola y reenvía al cloud. Si Enabled=false, el agent corre solo como
+	// puller (whitelist sync + heartbeat) — compat backward con v0.1.x.
+	Receiver struct {
+		Enabled       bool   `yaml:"enabled"`         // default true
+		BindAddress   string `yaml:"bind_address"`    // default 0.0.0.0:8787
+		QueueDir      string `yaml:"queue_dir"`       // default <appdata>/queue
+		MaxQueueItems int    `yaml:"max_queue_items"` // default 10000
+		MaxQueueBytes int64  `yaml:"max_queue_bytes"` // default 1GB
+		ReplayTickSec int    `yaml:"replay_tick_sec"` // default 30
+	} `yaml:"receiver"`
 }
 
 // loadConfig lee `configPath` (yaml), aplica overrides de env y devuelve
@@ -134,6 +147,31 @@ func (c *Config) applyDefaults() {
 		c.Log.File = "agent.log"
 	}
 	c.Camera.Type = strings.ToLower(strings.TrimSpace(c.Camera.Type))
+
+	// Receiver defaults — habilitado por default en v0.2.0+. Para deshabilitar
+	// explícitamente (modo legacy v0.1.x sin captura visual), poner
+	// `receiver: { enabled: false }` en el yaml.
+	if c.Receiver.BindAddress == "" {
+		c.Receiver.BindAddress = "0.0.0.0:8787"
+	}
+	if c.Receiver.QueueDir == "" {
+		// Default: <directorio del binario>/queue (mismo lugar que config.yaml).
+		// Si no podemos resolver exe path, fallback a CWD.
+		if exe, err := os.Executable(); err == nil {
+			c.Receiver.QueueDir = filepath.Join(filepath.Dir(exe), "queue")
+		} else {
+			c.Receiver.QueueDir = "queue"
+		}
+	}
+	if c.Receiver.MaxQueueItems == 0 {
+		c.Receiver.MaxQueueItems = 10000
+	}
+	if c.Receiver.MaxQueueBytes == 0 {
+		c.Receiver.MaxQueueBytes = 1 * 1024 * 1024 * 1024 // 1GB
+	}
+	if c.Receiver.ReplayTickSec == 0 {
+		c.Receiver.ReplayTickSec = 30
+	}
 }
 
 func (c *Config) validate() error {
