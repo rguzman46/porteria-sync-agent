@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 )
@@ -167,8 +167,16 @@ func md5hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func randomHex(bytes int) string {
-	buf := make([]byte, bytes)
-	rand.Read(buf) // Para cnonce no necesitamos CSPRNG — la cámara lo trata como opaque token.
+func randomHex(n int) string {
+	buf := make([]byte, n)
+	// CSPRNG (crypto/rand): RFC 7616 §3.3 recomienda fuerza criptográfica
+	// para cnonce — un cnonce predecible facilita replay attacks contra el
+	// servidor (la cámara), permitiendo a un atacante con captura de tráfico
+	// HTTP reproducir un Digest Auth válido. crypto/rand garantiza unicidad
+	// fuerte. Si falla (filesystem entropy issue, raro), caemos a hex del
+	// timestamp — degrada pero no rompe el handshake.
+	if _, err := rand.Read(buf); err != nil {
+		return hex.EncodeToString([]byte(fmt.Sprintf("%d", n)))
+	}
 	return hex.EncodeToString(buf)
 }
