@@ -11,16 +11,37 @@ cloud:
   token: pa_PEGA_AQUI_EL_TOKEN_DEL_DEVICE
 
 camera:
-  # Vendor de la cámara. V1 soporta hikvision. dahua/axis vienen en próximo release.
+  # Marca de la cámara. Valores aceptados: hikvision | dahua | axis.
+  # Si tu cámara está en el catálogo del cloud (/integrations), el script de
+  # instalación pre-rellena este campo según el modelo que el admin eligió.
   type: hikvision
+
+  # Familia/línea específica dentro de la marca. Solo es necesaria cuando un
+  # vendor tiene múltiples líneas con endpoints distintos. Valores:
+  #
+  #   hikvision_traffic — línea profesional (iDS-2CD7A26G0, iDS-TCM403-MA, ...)
+  #   hikvision_itc     — línea ITC Entrance (DS-TCG405-E, DS-TCG411-E, ...)
+  #   dahua_itc         — Dahua Intelligent Traffic Camera (ITC215, ITC237, ...)
+  #   axis_vapix        — Axis con ACAP "License Plate Verifier" instalado.
+  #
+  # Si lo dejas vacío y `type: hikvision`, asume `hikvision_traffic` (más común
+  # en producción hoy). Si `type: dahua` → `dahua_itc`. Si `type: axis` → `axis_vapix`.
+  family: ""
+
   # IP local de la cámara (red privada del conjunto).
   host: 192.168.1.50
-  # Puerto HTTP de la cámara (80 por default Hikvision).
+  # Puerto HTTP de la cámara (80 por default).
   port: 80
-  # Credenciales admin de la cámara. En firmware moderno Hikvision requiere
-  # contraseña fuerte (8+ chars, mayúsc/minúsc/dígitos).
+  # Credenciales admin de la cámara. En firmware moderno requiere contraseña
+  # fuerte (8+ chars, mayúsc/minúsc/dígitos).
   user: admin
   password: CAMBIA_ESTO
+
+  # Si true (default), el agent acepta auto-reconfigurarse cuando el admin
+  # cambia el modelo de la cámara en el panel /integrations. El cloud reporta
+  # la nueva familia en heartbeat/whitelist y el agent se ajusta sin reiniciar.
+  # Pon a false si quieres pin manual de la familia.
+  auto_config: true
 
 poll:
   # Cada cuántos segundos pollear al cloud. Mínimo 30. Recomendado 60.
@@ -38,11 +59,15 @@ log:
 # El agent encola el evento localmente y lo reenvía al cloud, sobreviviendo
 # outages de internet (queue persistente con back-off exponencial).
 #
+# La cámara debe configurarse para postear a:
+#   http://<IP_DEL_PC_PORTERO>:8787/lpr-event
+# con header X-Agent-Source acorde a su familia (hikvision, hikvision_itc,
+# dahua, dahua_itc, axis, axis_vapix). Si la cámara no permite headers
+# custom, usa X-Agent-Source: generic con JSON estándar.
+#
 # Para upgrade desde v0.1.x: si esta sección NO existe en el yaml, el agent
 # corre solo como puller (whitelist+heartbeat) — comportamiento legacy.
 receiver:
-  # Habilitar la captura visual. Si false, este device queda en modo legacy
-  # texto-only (la cámara debe postear directo al cloud sin pasar por el agent).
   enabled: true
 
   # Dirección donde escucha el HTTP server. 0.0.0.0 = LAN-accesible (cámara

@@ -33,6 +33,14 @@ param(
     [string]$Token,
     [string]$CloudUrl,
     [string]$CameraType = 'hikvision',
+    # V1.3 plug-and-play: familia específica del vendor cuando hay líneas con
+    # endpoints distintos. Si vacío, el agent deriva del CameraType:
+    #   hikvision → hikvision_traffic (línea profesional iDS-*)
+    #   dahua     → dahua_itc
+    #   axis      → axis_vapix
+    # El panel `/integrations` del cloud lo pre-puebla automáticamente cuando
+    # el admin elige el modelo de cámara desde el dropdown.
+    [string]$VendorFamily = '',
     [string]$CameraHost,
     [int]$CameraPort = 80,
     [string]$CameraUser = 'admin',
@@ -71,6 +79,11 @@ if (-not $Token -and $PSCmdlet.SessionState.PSVariable.Get('Token')) {
 }
 if (-not $CloudUrl -and $PSCmdlet.SessionState.PSVariable.Get('CloudUrl')) {
     $CloudUrl = $PSCmdlet.SessionState.PSVariable.Get('CloudUrl').Value
+}
+# VendorFamily se puede pasar como $VendorFamily en el scope llamante para que
+# el comando del panel `/integrations` lo pre-pueble sin que el admin lo escriba.
+if (-not $VendorFamily -and $PSCmdlet.SessionState.PSVariable.Get('VendorFamily')) {
+    $VendorFamily = $PSCmdlet.SessionState.PSVariable.Get('VendorFamily').Value
 }
 
 while (-not $Token) {
@@ -187,6 +200,19 @@ if (Test-Path $configPath) {
 }
 
 Write-Host "▸ Generando config.yaml ..."
+
+# Si VendorFamily empieza con prefijo de marca distinta al CameraType
+# (ej. type=dahua + family=hikvision_itc — inconsistente), warning + ignorar.
+# El cloud no debería enviarlo así pero defensa adicional.
+if ($VendorFamily) {
+    if (-not $VendorFamily.StartsWith($CameraType)) {
+        Write-Host "  ⚠ VendorFamily '$VendorFamily' no coincide con type '$CameraType' — usando type solo." -ForegroundColor Yellow
+        $VendorFamily = ''
+    }
+}
+
+$familyLine = if ($VendorFamily) { "  family: $VendorFamily" } else { '  family: ""' }
+
 $configContent = @"
 # Generado por install.ps1 el $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 # NO commitear este archivo — contiene secretos. chmod 600 equivalente.
@@ -197,10 +223,12 @@ cloud:
 
 camera:
   type: $CameraType
+$familyLine
   host: $CameraHost
   port: $CameraPort
   user: $CameraUser
   password: $CameraPassword
+  auto_config: true
 
 poll:
   interval_seconds: 60

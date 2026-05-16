@@ -1,55 +1,60 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
 )
 
-// HikvisionAdapter integra con la API ISAPI (Intelligent Security API)
-// de cámaras Hikvision. Documentación oficial:
+// HikvisionTrafficAdapter integra con la línea Traffic de cámaras Hikvision
+// vía API ISAPI (Intelligent Security API). Documentación oficial:
 // https://www.hikvision.com/en/support/download/sdk/
 //
-// Endpoints relevantes para LPR:
-//   POST /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo  — añadir placa
-//   PUT  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo  — reemplazar lista completa
-//   GET  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo  — leer lista actual
-//   DEL  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo/{id}  — quitar placa
+// Modelos soportados (familia `hikvision_traffic`):
+//   - iDS-2CD7A26G0/P-IZHS — bullet 4MP con LPR built-in.
+//   - iDS-TCM403-MA / iDS-TCM203-A — cámaras profesionales de tráfico.
+//   - DS-2CD7A85G0-LPR — 8MP profesional para parqueaderos comerciales.
+//
+// Endpoints relevantes para LPR Traffic:
+//
+//	POST /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo       — añadir placa
+//	PUT  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo       — reemplazar lista completa
+//	GET  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo       — leer lista actual
+//	DEL  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo/{id}  — quitar placa
+//
+// Para la línea ITC Entrance (DS-TCG*) ver `camera_hikvision_itc.go` — usa
+// un endpoint distinto (`/ISAPI/ITC/Entrance/VCL`) y formato XML levemente
+// diferente.
 //
 // Auth: HTTP Digest (estándar Hikvision). Los Hikvision modernos también
 // aceptan Basic, pero Digest es más seguro y es el default factory.
-type HikvisionAdapter struct {
+type HikvisionTrafficAdapter struct {
 	host     string
 	port     int
 	user     string
 	password string
-	http     *http.Client
+	digest   *digestClient
 }
 
-func NewHikvisionAdapter(host string, port int, user, password string) *HikvisionAdapter {
-	return &HikvisionAdapter{
+func NewHikvisionTrafficAdapter(host string, port int, user, password string) *HikvisionTrafficAdapter {
+	httpClient := &http.Client{Timeout: 20 * time.Second}
+	return &HikvisionTrafficAdapter{
 		host:     host,
 		port:     port,
 		user:     user,
 		password: password,
-		http: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		digest:   newDigestClient(user, password, httpClient),
 	}
 }
 
-func (h *HikvisionAdapter) Name() string {
-	return "hikvision"
+func (h *HikvisionTrafficAdapter) Name() string {
+	return "hikvision_traffic"
 }
 
-func (h *HikvisionAdapter) Ping(ctx context.Context) error {
+func (h *HikvisionTrafficAdapter) Ping(ctx context.Context) error {
 	// /ISAPI/System/deviceInfo retorna info del device (modelo, firmware).
 	// Es el endpoint estándar para health-check en Hikvision.
 	url := fmt.Sprintf("http://%s:%d/ISAPI/System/deviceInfo", h.host, h.port)
@@ -57,7 +62,7 @@ func (h *HikvisionAdapter) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := h.doWithDigest(req)
+	resp, err := h.digest.Do(req)
 	if err != nil {
 		return fmt.Errorf("ping a %s: %w", h.host, err)
 	}
@@ -72,8 +77,8 @@ func (h *HikvisionAdapter) Ping(ctx context.Context) error {
 // Hikvision ISAPI v2 acepta XML payload con todas las placas — la cámara
 // reemplaza su whitelist local atomicamente. Operación idempotente:
 // si las placas no cambiaron, no produce side-effects visibles al portero.
-func (h *HikvisionAdapter) SyncWhitelist(ctx context.Context, plates []Plate) error {
-	xml := buildHikvisionPlatesXML(plates)
+func (h *HikvisionTrafficAdapter) SyncWhitelist(ctx context.Context, plates []Plate) error {
+	xml := buildHikvisionTrafficPlatesXML(plates)
 	url := fmt.Sprintf("http://%s:%d/ISAPI/Traffic/channels/1/vehicleDetect/plateInfo", h.host, h.port)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(xml))
@@ -83,7 +88,7 @@ func (h *HikvisionAdapter) SyncWhitelist(ctx context.Context, plates []Plate) er
 	req.Header.Set("Content-Type", "application/xml")
 	req.Header.Set("Accept", "application/xml")
 
-	resp, err := h.doWithDigest(req)
+	resp, err := h.digest.Do(req)
 	if err != nil {
 		return fmt.Errorf("PUT whitelist: %w", err)
 	}
@@ -96,7 +101,9 @@ func (h *HikvisionAdapter) SyncWhitelist(ctx context.Context, plates []Plate) er
 	return nil
 }
 
-func buildHikvisionPlatesXML(plates []Plate) string {
+// buildHikvisionTrafficPlatesXML construye el XML para la línea Traffic.
+// Estructura raíz `<PlateInfoList version="2.0">` con elementos `<PlateInfo>`.
+func buildHikvisionTrafficPlatesXML(plates []Plate) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
 	b.WriteString(`<PlateInfoList version="2.0">`)
@@ -113,9 +120,9 @@ func buildHikvisionPlatesXML(plates []Plate) string {
 	return b.String()
 }
 
+// xmlEscape escapa los 5 chars XML estándar. Compartido por todos los
+// adapters XML (Hikvision Traffic, Hikvision ITC).
 func xmlEscape(s string) string {
-	// Hikvision rara vez recibe chars problemáticos en placas (alfanuméricas)
-	// pero por defensa: escapamos los 5 chars XML estándar.
 	r := strings.NewReplacer(
 		"&", "&amp;",
 		"<", "&lt;",
@@ -124,142 +131,4 @@ func xmlEscape(s string) string {
 		"'", "&apos;",
 	)
 	return r.Replace(s)
-}
-
-// doWithDigest ejecuta una request con HTTP Digest authentication.
-// Hikvision soporta Basic Auth pero el factory default es Digest — más
-// seguro y obligatorio en muchas instalaciones empresariales.
-//
-// El flow es:
-//  1. Primera request sin auth → cámara retorna 401 con WWW-Authenticate header.
-//  2. Parseamos el challenge (realm + nonce + algorithm).
-//  3. Reenviamos con header `Authorization: Digest ...` calculado.
-func (h *HikvisionAdapter) doWithDigest(req *http.Request) (*http.Response, error) {
-	// Clonamos el body para poder re-enviarlo tras el 401 challenge.
-	var bodyBytes []byte
-	if req.Body != nil {
-		var err error
-		bodyBytes, err = io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		req.ContentLength = int64(len(bodyBytes))
-	}
-
-	// Primera tentativa sin auth.
-	resp, err := h.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		return resp, nil // OK o error real distinto a 401
-	}
-
-	// Parseamos el challenge del header WWW-Authenticate.
-	authHeader := resp.Header.Get("WWW-Authenticate")
-	resp.Body.Close()
-	if !strings.HasPrefix(authHeader, "Digest ") {
-		return nil, fmt.Errorf("cámara no devolvió Digest challenge: %q", authHeader)
-	}
-	challenge := parseDigestChallenge(authHeader)
-
-	// Segunda tentativa con Authorization calculado.
-	req2, err := http.NewRequestWithContext(req.Context(), req.Method, req.URL.String(), bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-	req2.Header = req.Header.Clone()
-	req2.Header.Set("Authorization", h.buildDigestHeader(challenge, req.Method, req.URL.RequestURI()))
-
-	return h.http.Do(req2)
-}
-
-func parseDigestChallenge(header string) map[string]string {
-	result := map[string]string{}
-	body := strings.TrimPrefix(header, "Digest ")
-	for _, part := range splitDigestParts(body) {
-		eq := strings.IndexByte(part, '=')
-		if eq < 0 {
-			continue
-		}
-		key := strings.TrimSpace(part[:eq])
-		val := strings.Trim(strings.TrimSpace(part[eq+1:]), `"`)
-		result[key] = val
-	}
-	return result
-}
-
-// splitDigestParts hace split por comas respetando valores entre comillas.
-// El parsing custom es necesario porque `strings.Split(s, ",")` rompería
-// valores que contienen comas (ej. realm con espacios y comas).
-func splitDigestParts(s string) []string {
-	var parts []string
-	var current strings.Builder
-	inQuotes := false
-	for _, r := range s {
-		if r == '"' {
-			inQuotes = !inQuotes
-			current.WriteRune(r)
-			continue
-		}
-		if r == ',' && !inQuotes {
-			parts = append(parts, strings.TrimSpace(current.String()))
-			current.Reset()
-			continue
-		}
-		current.WriteRune(r)
-	}
-	if current.Len() > 0 {
-		parts = append(parts, strings.TrimSpace(current.String()))
-	}
-	return parts
-}
-
-func (h *HikvisionAdapter) buildDigestHeader(c map[string]string, method, uri string) string {
-	realm := c["realm"]
-	nonce := c["nonce"]
-	qop := c["qop"]
-	opaque := c["opaque"]
-	algorithm := c["algorithm"]
-	if algorithm == "" {
-		algorithm = "MD5"
-	}
-
-	cnonce := randomHex(8)
-	nc := "00000001"
-
-	ha1 := md5hex(h.user + ":" + realm + ":" + h.password)
-	ha2 := md5hex(method + ":" + uri)
-
-	var response string
-	if qop != "" {
-		response = md5hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2)
-	} else {
-		response = md5hex(ha1 + ":" + nonce + ":" + ha2)
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, `Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=%s, response="%s"`,
-		h.user, realm, nonce, uri, algorithm, response)
-	if qop != "" {
-		fmt.Fprintf(&b, `, qop=%s, nc=%s, cnonce="%s"`, qop, nc, cnonce)
-	}
-	if opaque != "" {
-		fmt.Fprintf(&b, `, opaque="%s"`, opaque)
-	}
-	return b.String()
-}
-
-func md5hex(s string) string {
-	h := md5.Sum([]byte(s))
-	return hex.EncodeToString(h[:])
-}
-
-func randomHex(bytes int) string {
-	buf := make([]byte, bytes)
-	rand.Read(buf) // Para cnonce no necesitamos CSPRNG — Hikvision lo trata como opaque token.
-	return hex.EncodeToString(buf)
 }

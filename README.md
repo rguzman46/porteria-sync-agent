@@ -78,15 +78,34 @@ Las env vars sobreescriben los valores del yaml.
 
 ---
 
-## Vendors soportados
+## Vendors y familias soportadas
 
-| Vendor | Estado V1 | API |
-|---|---|---|
-| Hikvision | ✅ Estable | ISAPI v2 (Digest auth, PUT `/ISAPI/Traffic/.../plateInfo`) |
-| Dahua | ⏳ Stub (próximo release) | CGI (Basic/Digest) |
-| Axis | ⏳ Stub (próximo release) | VAPIX + ACAP License Plate Verifier |
+V1.3+ soporta múltiples marcas y **sub-familias** dentro de cada marca (porque diferentes líneas del mismo vendor a veces usan endpoints distintos). El admin elige el modelo exacto en `/integrations` del cloud; el sync agent recibe el `vendor_family` resuelto en el heartbeat/whitelist y carga el adapter correcto automáticamente.
 
-Si tu conjunto usa otro vendor, contacta `soporte@porteriaplus.com` para que te incluyamos en el beta.
+| Familia (`vendor_family`) | Marca | Endpoint | Auth | Modelos soportados | Estado |
+|---|---|---|---|---|---|
+| `hikvision_traffic` | Hikvision (línea profesional) | `/ISAPI/Traffic/channels/1/vehicleDetect/plateInfo` | Digest | iDS-2CD7A26G0/P-IZHS, iDS-TCM403-MA, iDS-TCM203-A, DS-2CD7A85G0-LPR | ✅ Estable |
+| `hikvision_itc` | Hikvision (línea ITC Entrance) | `/ISAPI/ITC/Entrance/VCL` | Digest | DS-TCG405-E, DS-TCG405-E/H, DS-TCG411-E, DS-TCG615-EI | ⏳ Beta |
+| `dahua_itc` | Dahua | `/cgi-bin/recordUpdater.cgi` (CGI) | Digest | ITC215-PW6M-IRLZF, ITC237-PU1B-IRZF, ITC413-PW4D-IZ | ⏳ Beta |
+| `axis_vapix` | Axis | `/local/lpv/.api` (ACAP LPV) | Digest | P3265-LVE, Q1700-LE (requiere licencia ACAP "License Plate Verifier") | ⏳ Beta |
+
+**Retrocompat con configs viejas (V0.1-V0.2):** `type: hikvision` sin `family` → resuelve a `hikvision_traffic` (línea de producción hoy). `dahua` → `dahua_itc`. `axis` → `axis_vapix`.
+
+### Auto-config plug-and-play
+
+Si `auto_config: true` (default), el agent acepta reconfigurarse en caliente cuando el cloud reporta una `vendor_family` distinta. Útil cuando el admin del conjunto cambia el modelo de la cámara en `/integrations` — el agent detecta el cambio en el siguiente heartbeat (≤60s) y carga el adapter nuevo sin reiniciar el servicio.
+
+Para pin manual (debug, hardware experimental, etc.), pon `auto_config: false` en `config.yaml`.
+
+### Cómo agregar un nuevo vendor / familia
+
+1. **Catálogo en el cloud** (`config/lpr.php` en repo `SaaS`): agrega la marca y/o familia con modelos + endpoint + dialecto auth.
+2. **Adapter Go en este repo:** crea `camera_<vendor>.go` que implemente la interfaz `CameraAdapter` (Name, Ping, SyncWhitelist). Usa `digestClient` si la cámara requiere Digest auth (compartido).
+3. **Registrarlo en el factory** `camera.go::NewCameraAdapter()` con un nuevo `case "vendor_family":`.
+4. **Tests** en `camera_test.go` — al menos: Ping endpoint correcto, SyncWhitelist envía al endpoint esperado con XML/JSON válido.
+5. **Receiver dispatch** en `receiver.go` si el vendor empuja eventos al `:8787/lpr-event` con formato distinto (ej. nuevo XML schema). Si reusa el parser `generic` (event_data JSON + snapshot), no hay que tocar nada.
+
+Si tu conjunto usa un vendor que no está listado, contacta `soporte@porteriaplus.com` para que te incluyamos en el beta del adapter.
 
 ---
 

@@ -17,17 +17,30 @@ import (
 // Plate representa una entrada del whitelist devuelto por el cloud.
 type Plate struct {
 	Plate      string `json:"plate"`
-	Type       string `json:"type"`   // "vehicle" | "invitation"
-	Owner      string `json:"owner"`  // nullable
+	Type       string `json:"type"`  // "vehicle" | "invitation"
+	Owner      string `json:"owner"` // nullable
 	ValidFrom  string `json:"valid_from"`
 	ValidUntil string `json:"valid_until"`
 }
 
+// DeviceMetadata es la sub-estructura `device` que el cloud incluye en
+// /api/access/whitelist y /api/access/heartbeat desde V1.3 (plug-and-play).
+// Permite al agent auto-configurar su adapter sin que el admin tenga que
+// editar config.yaml — si el admin cambia el modelo en el panel, el cloud
+// reporta el nuevo vendor_family acá y el agent se reconfigura.
+type DeviceMetadata struct {
+	ID           int64  `json:"id"`
+	DeviceType   string `json:"device_type"`   // hikvision | dahua | axis | ...
+	VendorFamily string `json:"vendor_family"` // hikvision_traffic | hikvision_itc | dahua_itc | axis_vapix | null
+	DeviceModel  string `json:"device_model"`  // "DS-TCG405-E" | "ITC215-PW6M-IRLZF" | "" | null
+}
+
 // Whitelist es la respuesta completa del endpoint /api/access/whitelist.
 type Whitelist struct {
-	Version     string  `json:"version"`
-	GeneratedAt string  `json:"generated_at"`
-	Plates      []Plate `json:"plates"`
+	Version     string          `json:"version"`
+	GeneratedAt string          `json:"generated_at"`
+	Plates      []Plate         `json:"plates"`
+	Device      *DeviceMetadata `json:"device,omitempty"` // V1.3+ — auto-config
 }
 
 // CloudClient encapsula las llamadas HTTPS al cloud de Porteria Plus.
@@ -131,11 +144,20 @@ func (c *CloudClient) FetchWhitelist(ctx context.Context) (*Whitelist, bool, err
 	}
 }
 
+// HeartbeatResult resume la respuesta del cloud al heartbeat.
+type HeartbeatResult struct {
+	OK               bool            `json:"ok"`
+	ServerTime       string          `json:"server_time"`
+	WhitelistVersion string          `json:"whitelist_version"`
+	Device           *DeviceMetadata `json:"device,omitempty"`
+}
+
 // Heartbeat reporta al cloud que el agent está vivo. Incluye agent_version
 // y system_info para que el panel del admin pueda diagnosticar a distancia.
-// Retorna la versión actual del whitelist desde la respuesta del cloud
-// (útil para detectar cambios incluso entre polls del whitelist).
-func (c *CloudClient) Heartbeat(ctx context.Context) (whitelistVersion string, err error) {
+// Retorna la versión actual del whitelist + metadata del device (V1.3+)
+// para que el agent pueda auto-actualizar su adapter si el admin cambió
+// de modelo en el panel.
+func (c *CloudClient) Heartbeat(ctx context.Context) (*HeartbeatResult, error) {
 	payload := map[string]string{
 		"agent_version": AgentVersion,
 		"system_info":   fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
@@ -144,7 +166,7 @@ func (c *CloudClient) Heartbeat(ctx context.Context) (whitelistVersion string, e
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/access/heartbeat", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
@@ -153,24 +175,20 @@ func (c *CloudClient) Heartbeat(ctx context.Context) (whitelistVersion string, e
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("heartbeat status %d: %s", resp.StatusCode, snippet)
+		return nil, fmt.Errorf("heartbeat status %d: %s", resp.StatusCode, snippet)
 	}
 
-	var response struct {
-		OK               bool   `json:"ok"`
-		ServerTime       string `json:"server_time"`
-		WhitelistVersion string `json:"whitelist_version"`
+	var result HeartbeatResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("parseando respuesta heartbeat: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return "", fmt.Errorf("parseando respuesta heartbeat: %w", err)
-	}
-	return response.WhitelistVersion, nil
+	return &result, nil
 }
 
 // PostEventMultipartResult resume el resultado del cloud al recibir el

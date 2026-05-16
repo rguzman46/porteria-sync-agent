@@ -103,8 +103,8 @@ func (p *program) run() {
 		log.Println("[main] receiver deshabilitado (modo legacy v0.1.x — solo whitelist sync)")
 	}
 
-	// 5) Arrancar el loop de sync (whitelist + heartbeat).
-	syncer := NewSyncer(cloud, camera, p.cfg.Poll.IntervalSeconds)
+	// 5) Arrancar el loop de sync (whitelist + heartbeat + auto-config).
+	syncer := NewSyncer(cloud, p.cfg, camera, p.cfg.Poll.IntervalSeconds)
 	syncer.Run(ctx)
 }
 

@@ -117,12 +117,25 @@ func (r *Receiver) handleLprEvent(w http.ResponseWriter, req *http.Request) {
 	)
 
 	switch source {
-	case "hikvision":
+	// Familia Hikvision — ambas líneas (Traffic y ITC) emiten el MISMO XML
+	// EventNotificationAlert con estructura ANPR. El parser es uno solo.
+	// Aceptamos aliases por robustez frente a cámaras mal configuradas.
+	case "hikvision", "hikvision_traffic", "hikvision_itc":
 		event, snapshot, err = parseHikvisionMultipart(req)
+	// Familia Dahua — la cámara empuja JSON Smart Event (formato distinto a
+	// Hikvision). Para V1 reusamos el parser genérico — el integrador puede
+	// configurar la cámara para emitir hacia /lpr-event con X-Agent-Source:dahua
+	// y un payload `event_data`+`snapshot` estándar.
+	case "dahua", "dahua_itc":
+		event, snapshot, err = parseGenericMultipart(req)
+	// Familia Axis con ACAP LPV — el ACAP empuja JSON con plate, timestamp,
+	// directory, confidence. Reusa parser genérico.
+	case "axis", "axis_vapix":
+		event, snapshot, err = parseGenericMultipart(req)
 	case "generic", "json":
 		event, snapshot, err = parseGenericMultipart(req)
 	default:
-		http.Error(w, fmt.Sprintf("X-Agent-Source desconocido: %q (soportados: hikvision, generic)", source), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("X-Agent-Source desconocido: %q (soportados: hikvision, hikvision_traffic, hikvision_itc, dahua, dahua_itc, axis, axis_vapix, generic)", source), http.StatusBadRequest)
 		return
 	}
 
