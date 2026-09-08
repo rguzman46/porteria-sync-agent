@@ -27,14 +27,33 @@ import (
 //
 // Si el agent se detiene (Windows Service stop): el último whitelist queda
 // en la cámara. La portería opera offline indefinidamente.
+// ColaConEstadisticas es lo único que el Syncer necesita de la queue local:
+// cuántos eventos hay represados. Se toma como interfaz y no como *FileQueue
+// para que el receiver siga siendo opcional — cuando está apagado, el Syncer
+// simplemente no tiene queue y reporta cero.
+type ColaConEstadisticas interface {
+	Stats() (items int, bytes int64, oldestAge time.Duration)
+}
+
 type Syncer struct {
 	cloud    *CloudClient
 	cfg      *Config
 	interval time.Duration
+	queue    ColaConEstadisticas
 
 	mu                sync.Mutex
 	camera            CameraAdapter
 	consecutiveErrors int
+
+	// Resultado del último push a la cámara, que se reporta en el siguiente
+	// heartbeat. Va aquí y no en una variable local porque el heartbeat de un
+	// ciclo ocurre ANTES del push de ese mismo ciclo: lo que se reporta es
+	// siempre el resultado del ciclo anterior, que es justo lo que interesa
+	// —si el push lleva fallando, se sabe en el siguiente latido y no cuando
+	// alguien vaya a mirar el log del PC de la portería—.
+	lastPushOK      *bool
+	lastPushError   string
+	lastPlatesCount int
 }
 
 func NewSyncer(cloud *CloudClient, cfg *Config, camera CameraAdapter, intervalSeconds int) *Syncer {
@@ -44,6 +63,46 @@ func NewSyncer(cloud *CloudClient, cfg *Config, camera CameraAdapter, intervalSe
 		camera:   camera,
 		interval: time.Duration(intervalSeconds) * time.Second,
 	}
+}
+
+// ConCola le da al Syncer la queue local para que pueda reportar cuánto hay
+// represado. Sin ella el agent reporta cero, que es correcto: si el receiver
+// está apagado, no hay nada encolándose.
+func (s *Syncer) ConCola(q ColaConEstadisticas) *Syncer {
+	s.queue = q
+	return s
+}
+
+// reporte arma lo que se le cuenta al cloud en este latido.
+func (s *Syncer) reporte() HeartbeatReport {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r := HeartbeatReport{
+		CameraPushOK:    s.lastPushOK,
+		CameraPushError: s.lastPushError,
+		PlatesPushed:    s.lastPlatesCount,
+	}
+	if s.queue != nil {
+		items, _, _ := s.queue.Stats()
+		r.QueueSize = items
+	}
+	return r
+}
+
+// anotarPush guarda cómo le fue al push para el siguiente latido.
+func (s *Syncer) anotarPush(err error, placas int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ok := err == nil
+	s.lastPushOK = &ok
+	if ok {
+		s.lastPushError = ""
+		s.lastPlatesCount = placas
+		return
+	}
+	s.lastPushError = err.Error()
 }
 
 // Run ejecuta el loop hasta que ctx se cancele (señal del Windows Service).
@@ -76,7 +135,7 @@ func (s *Syncer) cycle(ctx context.Context) {
 	defer cancel()
 
 	// 1) Heartbeat. Si falla, asumimos red caída — saltamos fetch.
-	hb, err := s.cloud.Heartbeat(cycleCtx)
+	hb, err := s.cloud.Heartbeat(cycleCtx, s.reporte())
 	if err != nil {
 		s.consecutiveErrors++
 		log.Printf("[sync] heartbeat falló (consecutivos=%d): %v", s.consecutiveErrors, err)
@@ -117,6 +176,10 @@ func (s *Syncer) cycle(ctx context.Context) {
 	camera := s.currentCamera()
 	log.Printf("[sync] whitelist actualizado: %d placas (versión %s, adapter=%s)", len(wl.Plates), wl.Version, camera.Name())
 	if err := camera.SyncWhitelist(cycleCtx, wl.Plates); err != nil {
+		// Se anota para el siguiente latido: es la única forma de que el
+		// panel se entere. Sin esto, este error vivía y moría en el log de un
+		// computador al que hay que ir a mirar.
+		s.anotarPush(err, 0)
 		log.Printf("[sync] push a cámara falló: %v", err)
 		// NO incrementar consecutiveErrors aquí — la red al cloud anda bien.
 		// NO hacemos AckPending — el próximo FetchWhitelist re-pedirá el
@@ -129,6 +192,7 @@ func (s *Syncer) cycle(ctx context.Context) {
 
 	// Push exitoso → confirmar al cloud client que ya tenemos esta versión.
 	// Las siguientes requests usarán este Last-Modified como If-Modified-Since.
+	s.anotarPush(nil, len(wl.Plates))
 	s.cloud.AckPending()
 	log.Printf("[sync] cámara sincronizada exitosamente")
 }

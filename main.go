@@ -62,6 +62,14 @@ func (p *program) run() {
 
 	// 1) Construir cliente cloud (compartido entre syncer y replay).
 	cloud := NewCloudClient(p.cfg.Cloud.BaseURL, p.cfg.Cloud.Token)
+	if p.cfg.Cloud.DeviceToken != "" {
+		cloud = cloud.ConDeviceToken(p.cfg.Cloud.DeviceToken)
+	} else {
+		log.Println("[main] ⚠ sin `cloud.device_token`: el cloud va a atribuir " +
+			"las lecturas al primer dispositivo del conjunto. En una portería con " +
+			"cámara de entrada Y de salida, las salidas quedan como entradas. " +
+			"Pon el token que el panel muestra al registrar la cámara.")
+	}
 
 	// 2) Construir adapter de cámara (para whitelist push).
 	camera, err := NewCameraAdapter(p.cfg)
@@ -80,6 +88,7 @@ func (p *program) run() {
 	// goroutines separadas. La captura visual es opt-in vía config — los
 	// agents v0.1.x existentes (sin sección `receiver:` en yaml) siguen
 	// corriendo solo como puller (whitelist + heartbeat) sin cambios.
+	var colaLocal ColaConEstadisticas
 	if p.cfg.Receiver.Enabled {
 		queue, err := NewFileQueue(p.cfg.Receiver.QueueDir, p.cfg.Receiver.MaxQueueItems, p.cfg.Receiver.MaxQueueBytes)
 		if err != nil {
@@ -96,6 +105,7 @@ func (p *program) run() {
 		replay := NewReplayWorker(cloud, queue, p.cfg.Receiver.ReplayTickSec)
 		go replay.Run(ctx)
 
+		colaLocal = queue
 		items, bytes, oldest := queue.Stats()
 		log.Printf("[main] receiver+replay activos. Queue actual: items=%d bytes=%d oldest=%s",
 			items, bytes, oldest.Round(time.Second))
@@ -105,18 +115,23 @@ func (p *program) run() {
 
 	// 5) Arrancar el loop de sync (whitelist + heartbeat + auto-config).
 	syncer := NewSyncer(cloud, p.cfg, camera, p.cfg.Poll.IntervalSeconds)
+	if colaLocal != nil {
+		// Para que el panel del conjunto sepa cuánto hay represado sin que
+		// nadie tenga que entrar al computador de la portería.
+		syncer = syncer.ConCola(colaLocal)
+	}
 	syncer.Run(ctx)
 }
 
 func main() {
 	var (
-		configPath  = flag.String("config", "", "Ruta al config.yaml (default: junto al binario)")
-		installFlag = flag.Bool("install", false, "Instalar como servicio del sistema")
+		configPath    = flag.String("config", "", "Ruta al config.yaml (default: junto al binario)")
+		installFlag   = flag.Bool("install", false, "Instalar como servicio del sistema")
 		uninstallFlag = flag.Bool("uninstall", false, "Desinstalar el servicio del sistema")
-		startFlag   = flag.Bool("start", false, "Arrancar el servicio (si está instalado)")
-		stopFlag    = flag.Bool("stop", false, "Detener el servicio (si está corriendo)")
-		statusFlag  = flag.Bool("status", false, "Mostrar el estado del servicio")
-		versionFlag = flag.Bool("version", false, "Mostrar la versión del agent")
+		startFlag     = flag.Bool("start", false, "Arrancar el servicio (si está instalado)")
+		stopFlag      = flag.Bool("stop", false, "Detener el servicio (si está corriendo)")
+		statusFlag    = flag.Bool("status", false, "Mostrar el estado del servicio")
+		versionFlag   = flag.Bool("version", false, "Mostrar la versión del agent")
 	)
 	flag.Parse()
 

@@ -16,8 +16,26 @@ import (
 // con permisos restrictivos (chmod 600).
 type Config struct {
 	Cloud struct {
-		BaseURL string `yaml:"base_url"` // https://catamaran.porteriaplus.com
-		Token   string `yaml:"token"`    // pa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+		BaseURL string `yaml:"base_url"` // https://miconjunto.porteriaplus.com
+
+		// Token es la **llave de API del conjunto** (`ppk_…`), la que se crea
+		// en «Integraciones y API keys». Autentica al conjunto, no a la
+		// cámara: puede ser la misma para todos los agents del conjunto.
+		Token string `yaml:"token"`
+
+		// DeviceToken es el token de **esta cámara** (`ppd_…`), el que el
+		// panel muestra una sola vez al registrarla.
+		//
+		// Sin él, el cloud cae al primer dispositivo activo del conjunto, y en
+		// una portería con cámara de entrada Y de salida eso significa que
+		// **las salidas se registran como entradas**: el sentido y el modo son
+		// del dispositivo, no de la llave. La visita no se cierra al salir y el
+		// conteo de quién está adentro solo crece.
+		//
+		// Es opcional para no romper las instalaciones que ya están en campo
+		// sin él —siguen funcionando como antes, atribuidas al primer
+		// dispositivo—, pero cualquier instalación nueva debe ponerlo.
+		DeviceToken string `yaml:"device_token"`
 	} `yaml:"cloud"`
 
 	Camera struct {
@@ -136,11 +154,15 @@ func findDefaultConfigPath() string {
 // applyEnvOverrides permite que credenciales sensibles se inyecten por env
 // en lugar de yaml (útil en CI / docker / Windows Service con env vars).
 // Variables soportadas: PORTERIA_CLOUD_URL, PORTERIA_CLOUD_TOKEN,
+// PORTERIA_DEVICE_TOKEN,
 // PORTERIA_CAMERA_HOST, PORTERIA_CAMERA_USER, PORTERIA_CAMERA_PASSWORD,
 // PORTERIA_CAMERA_TYPE, PORTERIA_CAMERA_FAMILY.
 func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("PORTERIA_CLOUD_URL"); v != "" {
 		c.Cloud.BaseURL = v
+	}
+	if v := os.Getenv("PORTERIA_DEVICE_TOKEN"); v != "" {
+		c.Cloud.DeviceToken = v
 	}
 	if v := os.Getenv("PORTERIA_CLOUD_TOKEN"); v != "" {
 		c.Cloud.Token = v

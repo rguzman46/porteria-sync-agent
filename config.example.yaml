@@ -4,11 +4,23 @@
 # estos valores — útil para CI / Windows Service con env vars seguras.
 
 cloud:
-  # Subdominio tenant: catamaran.porteriaplus.com / oasis.porteriaplus.com / etc.
+  # El dominio del conjunto.
   base_url: https://TU_CONJUNTO.porteriaplus.com
-  # Bearer token generado en /integrations → Crear dispositivo. Se muestra UNA vez.
-  # Si lo pierdes, regenéralo desde el panel (el anterior queda invalidado).
-  token: pa_PEGA_AQUI_EL_TOKEN_DEL_DEVICE
+
+  # La LLAVE DEL CONJUNTO. Se crea en «Integraciones y API keys» con los
+  # permisos access:events, access:whitelist y access:heartbeat. Puede ser la
+  # misma para todos los agents del conjunto.
+  token: ppk_PEGA_AQUI_LA_LLAVE_DEL_CONJUNTO
+
+  # El TOKEN DE ESTA CÁMARA. El panel lo muestra UNA sola vez al registrarla;
+  # si se pierde, se regenera desde ahí y el anterior deja de servir.
+  #
+  # No es opcional en la práctica: sin él, el cloud atribuye las lecturas al
+  # primer dispositivo del conjunto. En una portería con cámara de entrada Y de
+  # salida, eso significa que las SALIDAS se registran como ENTRADAS —el
+  # sentido es del dispositivo, no de la llave—, la visita no se cierra y el
+  # conteo de quién está adentro solo crece.
+  device_token: ppd_PEGA_AQUI_EL_TOKEN_DE_LA_CAMARA
 
 camera:
   # Marca de la cámara. Valores aceptados: hikvision | dahua | axis.

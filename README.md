@@ -67,14 +67,50 @@ Get-Content agent.log -Tail 50
 Ver `config.example.yaml`. Las credenciales sensibles también pueden inyectarse por variables de entorno (útil para deploy automatizado):
 
 ```
-PORTERIA_CLOUD_URL=https://catamaran.porteriaplus.com
-PORTERIA_CLOUD_TOKEN=pa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+PORTERIA_CLOUD_URL=https://miconjunto.porteriaplus.com
+PORTERIA_CLOUD_TOKEN=ppk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+PORTERIA_DEVICE_TOKEN=ppd_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 PORTERIA_CAMERA_HOST=192.168.1.50
 PORTERIA_CAMERA_USER=admin
 PORTERIA_CAMERA_PASSWORD=...
 ```
 
 Las env vars sobreescriben los valores del yaml.
+
+### Dos tokens, y no son lo mismo
+
+| | Qué identifica | Dónde se saca |
+|---|---|---|
+| `token` (`ppk_…`) | **El conjunto** | Integraciones y API keys |
+| `device_token` (`ppd_…`) | **Esta cámara** | Al registrarla; se muestra una sola vez |
+
+Sin `device_token` el cloud atribuye las lecturas al primer dispositivo activo
+del conjunto. En una portería con cámara de entrada **y** de salida eso
+significa que **las salidas se registran como entradas**: el sentido y el modo
+son del dispositivo, no de la llave. La visita no se cierra al salir y el conteo
+de quién está adentro solo crece.
+
+El agent lo avisa en el log al arrancar si falta. Las instalaciones viejas sin
+él siguen funcionando como antes —atribuidas al primer dispositivo—, pero
+cualquier instalación nueva debe ponerlo.
+
+### Qué reporta el latido
+
+Cada latido cuenta **cómo le está yendo**, no solo que está vivo:
+
+| Campo | Para qué |
+|---|---|
+| `agent_version`, `system_info` | Diagnosticar sin ir al PC de la portería |
+| `camera_push_ok` / `camera_push_error` | Si logró escribirle la lista a la cámara |
+| `queue_size` | Cuántas lecturas quedaron represadas por falta de internet |
+| `plates_pushed` | Cuántas placas quedaron en la cámara |
+
+El segundo es el que importa y el que faltaba. **Estar vivo y tener la cámara al
+día no son lo mismo**: el agent puede estar corriendo, con internet, bajando la
+lista sin un error, y no poder escribirla en la cámara porque le cambiaron la
+clave. En ese estado el panel se veía verde mientras la lista de la cámara
+llevaba semanas congelada —los residentes nuevos no entran, los pases revocados
+siguen abriendo— y nadie se enteraba hasta que alguien reclamaba.
 
 ---
 
@@ -227,10 +263,17 @@ Para guía paso a paso con screenshots: ver [`docs/integracion-lpr-hikvision.md`
 
 | Versión | Lo que añade |
 |---|---|
-| **v0.2.0** (próxima) | Receiver HTTP server `:8787` + queue file-based + replay worker con back-off. La cámara LPR envía multipart al agent, el agent reenvía al cloud. Resiliencia offline natural. |
+| **v1.4.0** (próxima) | El latido cuenta **cómo le está yendo**: `camera_push_ok`, el motivo cuando falla y el tamaño de la cola. Y manda `X-Device-Token`, sin el cual el cloud atribuía las lecturas al primer dispositivo del conjunto. |
+| v1.3.0 | Plug-and-play multi-vendor: Hikvision ITC, Dahua y Axis completos, `digestClient` compartido y auto-configuración del adapter según lo que reporte el cloud. |
+| v0.2.0 | Receiver HTTP server `:8787` + queue file-based + replay worker con back-off. La cámara LPR envía multipart al agent, el agent reenvía al cloud. Resiliencia offline natural. |
 | v0.1.0 | Whitelist sync + heartbeat. Adapter Hikvision estable (ISAPI v2 + Digest auth). Self-install como Windows Service. |
 
-**Backward compat**: configs v0.1.x sin sección `receiver:` siguen corriendo solo como puller en v0.2.0+ (modo legacy). Para activar captura visual, añadir al yaml:
+**Backward compat**: una config sin `cloud.device_token` sigue funcionando —el
+cloud cae al primer dispositivo— y una sin sección `receiver:` corre solo como
+puller. Los campos nuevos del latido son opcionales del lado del cloud, así que
+un agent nuevo contra un cloud viejo tampoco se rompe.
+
+Para activar captura visual, añadir al yaml:
 
 ```yaml
 receiver:

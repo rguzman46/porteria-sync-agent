@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Plate representa una entrada del whitelist devuelto por el cloud.
@@ -47,10 +48,14 @@ type Whitelist struct {
 // Usa un único http.Client con timeouts agresivos — el polling loop debe
 // fallar rápido para reintentar, no quedarse colgado bloqueando el ciclo.
 type CloudClient struct {
-	baseURL    string
-	token      string
-	http       *http.Client
-	userAgent  string
+	baseURL string
+	token   string
+	// deviceToken identifica a ESTA cámara. Ver `Config.Cloud.DeviceToken`:
+	// sin él, el cloud atribuye todo al primer dispositivo del conjunto y en
+	// una portería con entrada y salida las salidas quedan como entradas.
+	deviceToken string
+	http        *http.Client
+	userAgent   string
 
 	// acknowledgedLastModified es el header `Last-Modified` que el syncer
 	// confirmó haber empujado exitosamente a la cámara local. Se envía como
@@ -99,7 +104,7 @@ func (c *CloudClient) FetchWhitelist(ctx context.Context) (*Whitelist, bool, err
 	if err != nil {
 		return nil, false, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	c.cabeceras(req)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
 	if c.acknowledgedLastModified != "" {
@@ -152,15 +157,53 @@ type HeartbeatResult struct {
 	Device           *DeviceMetadata `json:"device,omitempty"`
 }
 
-// Heartbeat reporta al cloud que el agent está vivo. Incluye agent_version
-// y system_info para que el panel del admin pueda diagnosticar a distancia.
+// HeartbeatReport es lo que el agent cuenta de sí mismo en cada latido.
+//
+// Estar vivo y tener la cámara al día NO son lo mismo, y esa distinción es la
+// razón de que esto exista. El agent puede estar corriendo, con internet, y
+// bajando el whitelist sin un solo error, y aun así no poder escribirlo en la
+// cámara —le cambiaron la clave, está apagada, el firmware no responde—. En
+// ese estado el panel se veía completamente verde mientras la lista de la
+// cámara llevaba semanas congelada: los residentes nuevos no entran y los
+// pases revocados siguen abriendo, y nadie se entera hasta que alguien
+// reclama.
+//
+// Los campos son opcionales (punteros / omitempty) para que un cloud viejo que
+// no los conozca los ignore sin romperse.
+type HeartbeatReport struct {
+	// CameraPushOK es nil en el primer latido, antes de haber intentado
+	// ningún push: no se ha fallado, pero tampoco se ha tenido éxito, y
+	// reportar `false` haría sonar una alarma por un agent recién instalado.
+	CameraPushOK    *bool
+	CameraPushError string
+	// QueueSize es lo que quedó represado por falta de internet. Cero es lo
+	// normal; un número que crece es que no está drenando.
+	QueueSize int
+	// PlatesPushed son las placas que quedaron escritas en la cámara en el
+	// último push exitoso.
+	PlatesPushed int
+}
+
+// Heartbeat reporta al cloud que el agent está vivo y **cómo le está yendo**.
 // Retorna la versión actual del whitelist + metadata del device (V1.3+)
 // para que el agent pueda auto-actualizar su adapter si el admin cambió
 // de modelo en el panel.
-func (c *CloudClient) Heartbeat(ctx context.Context) (*HeartbeatResult, error) {
-	payload := map[string]string{
+func (c *CloudClient) Heartbeat(ctx context.Context, report HeartbeatReport) (*HeartbeatResult, error) {
+	payload := map[string]any{
 		"agent_version": AgentVersion,
 		"system_info":   fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		"queue_size":    report.QueueSize,
+	}
+	if report.CameraPushOK != nil {
+		payload["camera_push_ok"] = *report.CameraPushOK
+		if !*report.CameraPushOK && report.CameraPushError != "" {
+			// Acotado: el cloud lo guarda en una columna de 500 y un error de
+			// driver puede traer un volcado entero.
+			payload["camera_push_error"] = truncar(report.CameraPushError, 500)
+		}
+		if *report.CameraPushOK && report.PlatesPushed > 0 {
+			payload["plates_pushed"] = report.PlatesPushed
+		}
 	}
 	body, _ := json.Marshal(payload)
 
@@ -168,7 +211,7 @@ func (c *CloudClient) Heartbeat(ctx context.Context) (*HeartbeatResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	c.cabeceras(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
@@ -194,13 +237,13 @@ func (c *CloudClient) Heartbeat(ctx context.Context) (*HeartbeatResult, error) {
 // PostEventMultipartResult resume el resultado del cloud al recibir el
 // evento + snapshot. Solo expone lo útil para logs del agent.
 type PostEventMultipartResult struct {
-	OK              bool   `json:"ok"`
-	EventID         int64  `json:"event_id"`
-	Action          string `json:"action"`
-	VisitaID        *int64 `json:"visita_id"`
-	Deduplicated    bool   `json:"deduplicated"`
-	SnapshotStored  bool   `json:"snapshot_stored"`
-	SnapshotPath    string `json:"snapshot_path"`
+	OK             bool   `json:"ok"`
+	EventID        int64  `json:"event_id"`
+	Action         string `json:"action"`
+	VisitaID       *int64 `json:"visita_id"`
+	Deduplicated   bool   `json:"deduplicated"`
+	SnapshotStored bool   `json:"snapshot_stored"`
+	SnapshotPath   string `json:"snapshot_path"`
 }
 
 // PostEventResultStatus categoriza el outcome para decidir si reintentamos.
@@ -232,7 +275,7 @@ func (c *CloudClient) PostEventMultipart(ctx context.Context, ev *QueuedEvent, s
 	if err != nil {
 		return PostEventPermanent, nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	c.cabeceras(req)
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
@@ -338,4 +381,32 @@ func (c *CloudClient) AckPending() {
 		c.acknowledgedLastModified = c.pendingLastModified
 		c.pendingLastModified = ""
 	}
+}
+
+// truncar corta un texto a n bytes sin partir un carácter UTF-8 por la mitad:
+// un error de la cámara puede venir en cualquier idioma y con acentos.
+func truncar(texto string, n int) string {
+	if len(texto) <= n {
+		return texto
+	}
+	corte := n
+	for corte > 0 && !utf8.RuneStart(texto[corte]) {
+		corte--
+	}
+	return texto[:corte]
+}
+
+// cabeceras pone lo que va en toda petición al cloud: quién es el conjunto
+// (la llave) y cuál de sus cámaras (el token del dispositivo).
+func (c *CloudClient) cabeceras(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.deviceToken != "" {
+		req.Header.Set("X-Device-Token", c.deviceToken)
+	}
+}
+
+// ConDeviceToken ata el cliente a una cámara concreta.
+func (c *CloudClient) ConDeviceToken(token string) *CloudClient {
+	c.deviceToken = token
+	return c
 }
