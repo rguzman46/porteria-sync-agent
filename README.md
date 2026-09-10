@@ -37,25 +37,50 @@ El SHA-256 del binario Windows se inyecta en `install.ps1` (Día 6) para que el 
 
 ## Instalación (operador del conjunto)
 
-Hoy (V1) la instalación es manual con PowerShell. Día 6 entrega un script `install.ps1` one-shot.
+**Un solo pegue.** El panel del conjunto arma el bloque completo al registrar
+la cámara —con la llave, el token de esa cámara, la URL y la familia del
+modelo ya puestos—; en el PC de la portería se abre PowerShell **como
+administrador**, se pega y ya:
 
 ```powershell
-# 1. Crear directorio + config
-mkdir C:\PorteriaAgent
-cd C:\PorteriaAgent
+Set-ExecutionPolicy -Scope Process Bypass -Force
+$Token       = 'ppk_...'                          # la llave del conjunto
+$DeviceToken = 'ppd_...'                          # el token de ESTA cámara
+$CloudUrl    = 'https://miconjunto.porteriaplus.com'
+iex (irm "$CloudUrl/integrations/install-script.ps1")
+```
 
-# 2. Descargar binario (CDN de Porteria Plus)
-Invoke-WebRequest -Uri "https://cdn.porteriaplus.com/agent/latest/porteria-agent.exe" -OutFile porteria-agent.exe
+Lo único que pregunta es lo que el panel no puede saber: **la IP de la cámara
+y su usuario y contraseña**. Y no se pasan por la URL a propósito: quedarían
+en el historial de la shell.
 
-# 3. Copiar config y editarla
+El script descarga el binario, verifica su SHA-256, agrega la exclusión de
+Windows Defender, escribe `config.yaml` con permisos de solo Admin+SYSTEM y
+registra el servicio para que arranque solo con el PC.
+
+### Los dos tokens, y por qué van los dos
+
+Es el error de instalación más caro y no se nota el día que pasa:
+
+- `Token` (`ppk_…`) dice **de qué conjunto** son las lecturas.
+- `DeviceToken` (`ppd_…`) dice **de cuál cámara**.
+
+Sin el segundo, el cloud atribuye todo al primer dispositivo activo del
+conjunto. En una portería con cámara de entrada **y** de salida, eso significa
+que **las salidas se registran como entradas**: las visitas no se cierran y el
+conteo de quién está adentro solo crece. Todo se ve funcionando.
+
+Por eso el instalador lo pide si no viene y no deja seguir sin él.
+
+### A mano, si hace falta
+
+```powershell
+mkdir C:\PorteriaAgent; cd C:\PorteriaAgent
+Invoke-WebRequest -Uri "https://github.com/rguzman46/porteria-sync-agent/releases/latest/download/porteria-agent.exe" -OutFile porteria-agent.exe
 Copy-Item config.example.yaml config.yaml
-notepad config.yaml   # rellenar token + camera IP + credenciales
-
-# 4. Instalar como Windows Service y arrancarlo
+notepad config.yaml            # token, device_token, IP y credenciales de la cámara
 .\porteria-agent.exe -install
 .\porteria-agent.exe -start
-
-# 5. Verificar estado
 .\porteria-agent.exe -status
 Get-Content agent.log -Tail 50
 ```

@@ -10,12 +10,16 @@
     Diseñado para ser invocado one-shot desde el panel admin del conjunto:
 
         Set-ExecutionPolicy -Scope Process Bypass -Force
-        $Token = 'pa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
-        $CloudUrl = 'https://catamaran.porteriaplus.com'
+        $Token = 'ppk_...'        # la llave del conjunto
+        $DeviceToken = 'ppd_...'  # el token de ESTA cámara
+        $CloudUrl = 'https://miconjunto.porteriaplus.com'
         iex (irm "$CloudUrl/integrations/install-script.ps1")
 
-    Si Token / CloudUrl no se pasan vía scope o parámetro, los pide
-    interactivamente. Pide siempre las credenciales de la cámara
+    El panel del conjunto arma ese bloque completo al registrar la cámara:
+    se copia y se pega, no se escribe nada.
+
+    Si Token / DeviceToken / CloudUrl no se pasan vía scope o parámetro, los
+    pide interactivamente. Pide siempre las credenciales de la cámara
     interactivamente (no se pasan por URL para evitar fugas en historiales
     de shell).
 
@@ -30,7 +34,15 @@
 
 [CmdletBinding()]
 param(
+    # La llave del conjunto (`ppk_…`): dice de qué conjunto son las lecturas.
     [string]$Token,
+    # El token de ESTA cámara (`ppd_…`): dice de cuál.
+    #
+    # No es opcional en la práctica. Sin él, el cloud atribuye todo al primer
+    # dispositivo activo del conjunto, y en una portería con cámara de entrada
+    # y de salida eso significa que **las salidas se registran como entradas**:
+    # la visita no se cierra y el conteo de quién está adentro solo crece.
+    [string]$DeviceToken,
     [string]$CloudUrl,
     [string]$CameraType = 'hikvision',
     # V1.3 plug-and-play: familia específica del vendor cuando hay líneas con
@@ -77,6 +89,9 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
 if (-not $Token -and $PSCmdlet.SessionState.PSVariable.Get('Token')) {
     $Token = $PSCmdlet.SessionState.PSVariable.Get('Token').Value
 }
+if (-not $DeviceToken -and $PSCmdlet.SessionState.PSVariable.Get('DeviceToken')) {
+    $DeviceToken = $PSCmdlet.SessionState.PSVariable.Get('DeviceToken').Value
+}
 if (-not $CloudUrl -and $PSCmdlet.SessionState.PSVariable.Get('CloudUrl')) {
     $CloudUrl = $PSCmdlet.SessionState.PSVariable.Get('CloudUrl').Value
 }
@@ -87,10 +102,21 @@ if (-not $VendorFamily -and $PSCmdlet.SessionState.PSVariable.Get('VendorFamily'
 }
 
 while (-not $Token) {
-    $Token = Read-Host "Bearer token del device (empieza con 'pa_')"
-    if (-not $Token.StartsWith('pa_')) {
-        Write-Host "  ⚠ El token debe empezar con 'pa_'" -ForegroundColor Yellow
+    $Token = Read-Host "Llave del conjunto (empieza con 'ppk_')"
+    if (-not $Token.StartsWith('ppk_')) {
+        Write-Host "  ⚠ La llave del conjunto empieza con 'ppk_'" -ForegroundColor Yellow
         $Token = $null
+    }
+}
+
+# Se pide, no se asume: una instalación sin él arranca con el sentido de las
+# lecturas invertido y nadie se entera hasta que alguien pregunta por qué el
+# conjunto dice tener treinta visitantes adentro.
+while (-not $DeviceToken) {
+    $DeviceToken = Read-Host "Token de esta camara (empieza con 'ppd_')"
+    if (-not $DeviceToken.StartsWith('ppd_')) {
+        Write-Host "  ⚠ El token de la camara empieza con 'ppd_'" -ForegroundColor Yellow
+        $DeviceToken = $null
     }
 }
 
@@ -220,6 +246,7 @@ $configContent = @"
 cloud:
   base_url: $CloudUrl
   token: $Token
+  device_token: $DeviceToken
 
 camera:
   type: $CameraType
