@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -18,17 +17,19 @@ import (
 //
 // Diferencia clave vs línea Traffic: el endpoint ISAPI es distinto.
 // Mientras Traffic usa `/ISAPI/Traffic/channels/1/vehicleDetect/plateInfo`,
-// la línea ITC tiene su propio módulo "Entrance" con endpoint:
+// la línea ITC (y los firmwares viejos en general, según la guía «How to
+// integrate with Hikvision LPR function via ISAPI» v1.0.0) tiene su propio
+// módulo "Entrance":
 //
 //	PUT /ISAPI/ITC/Entrance/VCL  — reemplazar Vehicle Control List
 //	GET /ISAPI/ITC/Entrance/VCL  — leer lista actual
 //
 // VCL = Vehicle Control List. En la web admin de la cámara está bajo
-// "Configuration → Vehicle Recognition → Plate Management" → modo "Allow List".
-// La cámara dispara su relé (Alarm Out) cuando detecta una placa en VCL,
-// permitiendo apertura local de talanquera sin pasar por el cloud.
+// "Configuration → Vehicle Recognition → Plate Management". La cámara
+// dispara su relé (Alarm Out) cuando detecta una placa permitida,
+// abriendo la talanquera sin pasar por el cloud.
 //
-// Estructura XML (validada con DS-TCG405-E firmware V5.7+):
+// Estructura XML:
 //
 //	<VehicleControlList version="2.0">
 //	  <Vehicle>
@@ -41,7 +42,6 @@ import (
 //	      <endTime>2026-12-31T23:59:59</endTime>
 //	    </effectiveTime>
 //	  </Vehicle>
-//	  ...
 //	</VehicleControlList>
 //
 // Auth: HTTP Digest (mismo que la línea Traffic — comparte digestClient).
@@ -64,55 +64,24 @@ func NewHikvisionITCAdapter(host string, port int, user, password string) *Hikvi
 	}
 }
 
-func (h *HikvisionITCAdapter) Name() string {
-	return "hikvision_itc"
+func (h *HikvisionITCAdapter) Name() string { return "hikvision_itc" }
+
+// Capacidades: la VCL lleva `plateType` 0 = Allow, 1 = Deny, así que la
+// lista negra viaja en el mismo PUT.
+func (h *HikvisionITCAdapter) Capacidades() Capacidades {
+	return Capacidades{Whitelist: true, Blocklist: true}
 }
 
 func (h *HikvisionITCAdapter) Ping(ctx context.Context) error {
-	// /ISAPI/System/deviceInfo está presente en TODAS las cámaras Hikvision —
-	// usado como health-check estándar también en la línea ITC.
-	url := fmt.Sprintf("http://%s:%d/ISAPI/System/deviceInfo", h.host, h.port)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := h.digest.Do(req)
-	if err != nil {
-		return fmt.Errorf("ping a %s: %w", h.host, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ping status %d", resp.StatusCode)
-	}
-	return nil
+	return pingHikvision(ctx, h.digest, h.host, h.port)
 }
 
 // SyncWhitelist empuja la VCL completa a la cámara ITC. La cámara la
-// almacena en flash y opera 100% offline después (decide aperturas locales
-// sin internet). Operación idempotente — si las placas no cambiaron, la
-// cámara no resetea su estado.
-func (h *HikvisionITCAdapter) SyncWhitelist(ctx context.Context, plates []Plate) error {
-	xml := buildHikvisionITCVehicleListXML(plates)
+// almacena en flash y opera 100% offline después. Idempotente.
+func (h *HikvisionITCAdapter) SyncWhitelist(ctx context.Context, plates []Plate, blocked []Plate) error {
+	xml := buildHikvisionITCVehicleListXML(plates, blocked)
 	url := fmt.Sprintf("http://%s:%d/ISAPI/ITC/Entrance/VCL", h.host, h.port)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(xml))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/xml")
-	req.Header.Set("Accept", "application/xml")
-
-	resp, err := h.digest.Do(req)
-	if err != nil {
-		return fmt.Errorf("PUT VCL: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("PUT VCL status %d: %s", resp.StatusCode, snippet)
-	}
-	return nil
+	return putXMLHikvision(ctx, h.digest, url, xml, "PUT VCL")
 }
 
 // buildHikvisionITCVehicleListXML construye el XML para la línea ITC.
@@ -121,14 +90,14 @@ func (h *HikvisionITCAdapter) SyncWhitelist(ctx context.Context, plates []Plate)
 //   - Elementos: <Vehicle> en lugar de <PlateInfo>.
 //   - Vigencia: <effectiveTime> con <enabled>, <beginTime>, <endTime>,
 //     en lugar de <effectivePeriod><endTime>.
-func buildHikvisionITCVehicleListXML(plates []Plate) string {
+func buildHikvisionITCVehicleListXML(plates []Plate, blocked []Plate) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
 	b.WriteString(`<VehicleControlList version="2.0">`)
-	for i, p := range plates {
-		fmt.Fprintf(&b, `<Vehicle><id>%d</id><plateNumber>%s</plateNumber>`, i+1, xmlEscape(p.Plate))
-		// `plateType=0` = Allow (whitelist). `1` = Deny (blacklist).
-		b.WriteString(`<plateType>0</plateType>`)
+	id := 0
+	escribir := func(p Plate, plateType int) {
+		id++
+		fmt.Fprintf(&b, `<Vehicle><id>%d</id><plateNumber>%s</plateNumber><plateType>%d</plateType>`, id, xmlEscape(p.Plate), plateType)
 		// La línea ITC requiere effectiveTime con enabled+begin+end juntos.
 		// Si no hay vigencia explícita del cloud, usamos vigencia permanente
 		// (1970..2099). Cámara igual la deja activa indefinidamente.
@@ -149,6 +118,12 @@ func buildHikvisionITCVehicleListXML(plates []Plate) string {
 			xmlEscape(begin), xmlEscape(end),
 		)
 		b.WriteString(`</Vehicle>`)
+	}
+	for _, p := range plates {
+		escribir(p, 0)
+	}
+	for _, p := range blocked {
+		escribir(p, 1)
 	}
 	b.WriteString(`</VehicleControlList>`)
 	return b.String()

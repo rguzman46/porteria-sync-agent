@@ -12,21 +12,18 @@ import (
 //  2. Pregunta si hay whitelist nuevo (If-Modified-Since).
 //  3. Si lo hay, lo empuja a la cámara local.
 //
-// V1.3+: el Syncer también detecta cambios de `vendor_family` reportados
-// por el cloud y hot-swap el adapter en caliente — sin reiniciar el agent.
-// Si el admin cambia el modelo de la cámara en el panel (ej. reemplaza
-// una DS-TCG405-E por una iDS-TCM403-MA), el siguiente heartbeat trae el
-// vendor_family nuevo y el agent se reconfigura automáticamente.
+// El Syncer también detecta cambios de `vendor_family` reportados por el
+// cloud (en la respuesta del whitelist o, si algún día lo manda, en la del
+// latido) y hace hot-swap del adapter sin reiniciar el agent.
 //
 // Resiliencia ante caídas:
 //   - Si el cloud falla: log + back-off exponencial. La cámara YA tiene el
 //     último whitelist sincronizado, así que la portería sigue funcionando.
-//   - Si la cámara falla en el push: log + retry en el próximo ciclo. El
-//     cloud volverá a marcar el whitelist como modificado en cuanto se
-//     pueda re-sincronizar.
+//   - Si la cámara falla en el push: log + retry en el próximo ciclo.
 //
 // Si el agent se detiene (Windows Service stop): el último whitelist queda
 // en la cámara. La portería opera offline indefinidamente.
+
 // ColaConEstadisticas es lo único que el Syncer necesita de la queue local:
 // cuántos eventos hay represados. Se toma como interfaz y no como *FileQueue
 // para que el receiver siga siendo opcional — cuando está apagado, el Syncer
@@ -54,6 +51,10 @@ type Syncer struct {
 	lastPushOK      *bool
 	lastPushError   string
 	lastPlatesCount int
+
+	// avisoSinSoporte evita repetir cada minuto que el adaptador no escribe
+	// listas: se dice una vez por adaptador y queda en el latido.
+	avisoSinSoporte string
 }
 
 func NewSyncer(cloud *CloudClient, cfg *Config, camera CameraAdapter, intervalSeconds int) *Syncer {
@@ -82,6 +83,10 @@ func (s *Syncer) reporte() HeartbeatReport {
 		CameraPushOK:    s.lastPushOK,
 		CameraPushError: s.lastPushError,
 		PlatesPushed:    s.lastPlatesCount,
+	}
+	if s.camera != nil {
+		caps := s.camera.Capacidades()
+		r.Capacidades = &caps
 	}
 	if s.queue != nil {
 		items, _, _ := s.queue.Stats()
@@ -143,8 +148,8 @@ func (s *Syncer) cycle(ctx context.Context) {
 		return
 	}
 
-	// 1.b) Auto-config: si el cloud reporta un vendor_family distinto al
-	// que tenemos cargado, hot-swap el adapter sin reiniciar.
+	// 1.b) Auto-config si el cloud lo manda acá. La plataforma actual no lo
+	// hace (lo manda con el whitelist); se acepta por si algún día lo hace.
 	if hb.Device != nil {
 		s.maybeReconfigureAdapter(hb.Device)
 	}
@@ -166,16 +171,31 @@ func (s *Syncer) cycle(ctx context.Context) {
 		return
 	}
 
-	// El whitelist response también trae device metadata (V1.3+) — usamos
-	// para auto-config también acá por si la marca cambia entre heartbeats.
 	if wl.Device != nil {
 		s.maybeReconfigureAdapter(wl.Device)
 	}
 
 	// 3) Push a la cámara.
 	camera := s.currentCamera()
-	log.Printf("[sync] whitelist actualizado: %d placas (versión %s, adapter=%s)", len(wl.Plates), wl.Version, camera.Name())
-	if err := camera.SyncWhitelist(cycleCtx, wl.Plates); err != nil {
+	caps := camera.Capacidades()
+	if !caps.Whitelist {
+		// No hay nada que empujar y no es un fallo: el panel lo ve en el
+		// latido (`whitelist_supported=false`). Se confirma la versión para
+		// no volver a bajar la misma lista cada minuto.
+		if s.avisoSinSoporte != camera.Name() {
+			log.Printf("[sync] el adaptador %s no escribe listas en la cámara en esta versión: la lista se baja pero no se empuja", camera.Name())
+			s.avisoSinSoporte = camera.Name()
+		}
+		s.cloud.AckPending()
+		return
+	}
+	blocked := wl.BlockedPlates
+	if !caps.Blocklist && len(blocked) > 0 {
+		log.Printf("[sync] el adaptador %s no soporta lista negra: %d placas negadas no se escriben en la cámara", camera.Name(), len(blocked))
+		blocked = nil
+	}
+	log.Printf("[sync] whitelist actualizado: %d placas, %d negadas (versión %s, adapter=%s)", len(wl.Plates), len(blocked), wl.Version, camera.Name())
+	if err := camera.SyncWhitelist(cycleCtx, wl.Plates, blocked); err != nil {
 		// Se anota para el siguiente latido: es la única forma de que el
 		// panel se entere. Sin esto, este error vivía y moría en el log de un
 		// computador al que hay que ir a mirar.

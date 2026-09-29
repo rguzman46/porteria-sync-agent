@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"strconv"
 	"time"
 )
 
@@ -14,32 +13,27 @@ import (
 // Estrategia:
 //
 //  1. Cada `tickInterval` lee los N más antiguos pendientes (default 10).
-//  2. Para cada uno, intenta `cloud.PostEventMultipart(ev, snapshot)`.
+//  2. Para cada uno, intenta `cloud.PostEventMultipart`.
 //  3. Si éxito: borrar del queue.
-//  4. Si permanent (4xx): borrar del queue + log warning (config inválida,
-//     no tiene sentido reintentar).
-//  5. Si transient (5xx, network): MarkAttempt (incrementa retry_count) +
-//     dejar para el próximo tick. Si retry_count > MaxRetries, descartar
-//     y log warning (probablemente algo más serio — auth roto, etc.).
-//
-// Back-off por evento: aplicamos un delay basado en `retry_count` para
-// no martillar al cloud con eventos que están fallando consistentemente.
-// Solo procesamos eventos cuyo `last_attempt_at` sea más antiguo que el
-// delay correspondiente.
+//  4. Si permanente (4xx): borrar del queue + log warning (payload inválido,
+//     llave revocada: reintentar no cambia nada).
+//  5. Si transitorio (5xx, red, 429): MarkAttempt y esperar el back-off.
+//     **Nunca se descarta por transitorio.** Antes se descartaba al quinto
+//     intento —unos 81 minutos de back-off acumulado—, así que un corte de
+//     internet de una tarde borraba las fotos de esa tarde: justo lo que la
+//     cola existe para evitar. El único techo es el de la cola misma
+//     (10.000 / 1 GB), que expulsa lo más viejo.
 type ReplayWorker struct {
 	cloud        *CloudClient
 	queue        *FileQueue
 	tickInterval time.Duration
 
-	// MaxRetries antes de descartar. 5 es generoso pero finito —
-	// outage de 6h con 30s tick = 720 tries, pero con back-off escalado
-	// alcanza ~3-4h efectivos antes de descarte. Suficiente para outages
-	// realistas.
-	maxRetries int
-
 	// batchSize: eventos a procesar por tick. 10 evita ráfagas que sobrecarguen
 	// el cloud cuando vuelve internet tras outage largo.
 	batchSize int
+
+	// ahora se inyecta en pruebas para no dormir de verdad.
+	ahora func() time.Time
 }
 
 func NewReplayWorker(cloud *CloudClient, queue *FileQueue, tickSeconds int) *ReplayWorker {
@@ -47,15 +41,14 @@ func NewReplayWorker(cloud *CloudClient, queue *FileQueue, tickSeconds int) *Rep
 		cloud:        cloud,
 		queue:        queue,
 		tickInterval: time.Duration(tickSeconds) * time.Second,
-		maxRetries:   5,
 		batchSize:    10,
+		ahora:        time.Now,
 	}
 }
 
 // Run bloquea procesando eventos hasta ctx.Done(). Debe llamarse en goroutine.
 func (w *ReplayWorker) Run(ctx context.Context) {
-	log.Printf("[replay] iniciando worker (tick=%s, batch=%d, max_retries=%d)",
-		w.tickInterval, w.batchSize, w.maxRetries)
+	log.Printf("[replay] iniciando worker (tick=%s, batch=%d)", w.tickInterval, w.batchSize)
 
 	// Primer ciclo inmediato — si el agent arranca con queue acumulada de
 	// una sesión anterior, drenamos ya.
@@ -86,7 +79,7 @@ func (w *ReplayWorker) processOnce(ctx context.Context) {
 		return
 	}
 
-	now := time.Now()
+	now := w.ahora()
 	for _, ev := range events {
 		// Back-off: si este evento intentó hace poco y falló, no insistimos.
 		if !w.eligibleForRetry(ev, now) {
@@ -116,65 +109,60 @@ func (w *ReplayWorker) tryOne(ctx context.Context, ev *QueuedEvent) {
 		_ = w.queue.Delete(ev.ID)
 		return
 	}
+	recorte := w.queue.Recorte(ev.ID)
 
-	status, result, err := w.cloud.PostEventMultipart(ctx, ev, snapshot)
+	status, result, err := w.cloud.PostEventMultipart(ctx, ev, snapshot, recorte)
 
 	switch status {
 	case PostEventSuccess:
-		visitaID := "-"
-		if result != nil && result.VisitaID != nil {
-			visitaID = "visita=" + strconv.FormatInt(*result.VisitaID, 10)
+		detalle := "-"
+		if result != nil {
+			detalle = result.Status
+			if result.BlocklistHit != "" {
+				detalle += " lista_negra=" + result.BlocklistHit
+			}
 		}
-		log.Printf("[replay] ✓ enviado evento %s placa=%s (%s)", ev.ID, ev.Plate, visitaID)
+		log.Printf("[replay] ✓ enviado evento %s placa=%s (%s)", ev.ID, ev.Plate, detalle)
 		_ = w.queue.Delete(ev.ID)
 
 	case PostEventPermanent:
-		// 4xx — config inválida, capture deshabilitada, payload malo, etc.
-		// Reintentar no va a cambiar el resultado. Descartar + warning.
+		// 4xx — llave revocada, payload malo, captura apagada. Reintentar no
+		// va a cambiar el resultado. Descartar + warning.
 		log.Printf("[replay] ✗ rechazo permanente evento %s placa=%s: %v (descartando)",
 			ev.ID, ev.Plate, err)
 		_ = w.queue.Delete(ev.ID)
 
 	case PostEventTransient:
-		// Red caída / cloud temporal / 5xx. Reintentar más tarde con back-off.
+		// Red caída / cloud temporal / 5xx. Se anota el intento para el
+		// back-off y se deja en la cola: volverá cuando vuelva internet.
 		_ = w.queue.MarkAttempt(ev)
-		if ev.RetryCount >= w.maxRetries {
-			log.Printf("[replay] ✗ evento %s placa=%s descartado tras %d reintentos: %v",
-				ev.ID, ev.Plate, ev.RetryCount, err)
-			_ = w.queue.Delete(ev.ID)
-		} else {
-			log.Printf("[replay] ↻ retry %d/%d evento %s placa=%s: %v",
-				ev.RetryCount, w.maxRetries, ev.ID, ev.Plate, err)
-		}
+		log.Printf("[replay] ↻ intento %d evento %s placa=%s (siguiente en %s): %v",
+			ev.RetryCount, ev.ID, ev.Plate, esperaDeReintento(ev.RetryCount), err)
 	}
 }
 
-// eligibleForRetry implementa el back-off por evento. Tabla de delays:
+// esperaDeReintento es el back-off por evento, acotado a 5 minutos: con
+// internet caído no hay nada que martillar, y cuando vuelve conviene que la
+// cola drene en minutos, no en horas. Tabla:
 //
-//	retry_count=0 → siempre (primer intento)
-//	retry_count=1 → 1 min desde last_attempt_at
-//	retry_count=2 → 5 min
-//	retry_count=3 → 15 min
-//	retry_count=4 → 1 hora
-//	retry_count>=5 → no aplica (ya descartado por tryOne)
-//
-// Esto evita martillar al cloud con eventos que están fallando consistentemente
-// — el primer evento de cada placa intenta inmediato (caso happy path) y solo
-// los que rebotan se ralentizan.
+//	1 fallo → 30 s, 2 → 1 min, 3 → 2 min, 4+ → 5 min.
+func esperaDeReintento(intentos int) time.Duration {
+	if intentos <= 0 {
+		return 0
+	}
+	delays := []time.Duration{30 * time.Second, 1 * time.Minute, 2 * time.Minute, 5 * time.Minute}
+	idx := intentos - 1
+	if idx >= len(delays) {
+		idx = len(delays) - 1
+	}
+	return delays[idx]
+}
+
+// eligibleForRetry aplica esperaDeReintento sobre last_attempt_at. El primer
+// intento de cada evento es inmediato: el caso normal no espera nada.
 func (w *ReplayWorker) eligibleForRetry(ev *QueuedEvent, now time.Time) bool {
 	if ev.RetryCount == 0 {
 		return true
 	}
-	delays := []time.Duration{
-		1 * time.Minute,
-		5 * time.Minute,
-		15 * time.Minute,
-		60 * time.Minute,
-	}
-	idx := ev.RetryCount - 1
-	if idx >= len(delays) {
-		idx = len(delays) - 1
-	}
-	return now.Sub(ev.LastAttemptAt) >= delays[idx]
+	return now.Sub(ev.LastAttemptAt) >= esperaDeReintento(ev.RetryCount)
 }
-

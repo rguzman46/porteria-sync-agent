@@ -14,13 +14,24 @@ import (
 	"time"
 )
 
+// PlateBox es el rectángulo de la placa dentro de la escena, en píxeles de
+// la foto tal como la mandó la cámara. El cloud lo normaliza a 0–1 con el
+// tamaño real de la imagen.
+type PlateBox struct {
+	XMin int `json:"xmin"`
+	YMin int `json:"ymin"`
+	XMax int `json:"xmax"`
+	YMax int `json:"ymax"`
+}
+
 // QueuedEvent es la unidad atómica de la queue local. Representa un evento
 // LPR recibido de la cámara que aún no fue subido exitosamente al cloud.
 //
-// Persistencia: cada evento se serializa en dos archivos en `queueDir/`:
+// Persistencia: cada evento se serializa en hasta tres archivos en `queueDir/`:
 //   - {ts}_{rand}.json — metadata (este struct serializado)
-//   - {ts}_{rand}.bin  — payload binario de la imagen (separado para no
-//     parsear N MB de JSON solo para chequear retry_count)
+//   - {ts}_{rand}.bin  — la escena (separada para no parsear N MB de JSON
+//     solo para chequear retry_count)
+//   - {ts}_{rand}.crop — el recorte de la placa, solo si la cámara lo mandó
 //
 // Atomicidad: write a tmpfile + os.Rename (POSIX atómico). Si el agent muere
 // mid-write, el .json incompleto queda como `.tmp` y el glob no lo recoge.
@@ -28,6 +39,12 @@ type QueuedEvent struct {
 	// ID interno (filename prefix). Formato: `{unix_nanoseconds}_{rand6}`.
 	// Ordenable lexicográficamente = ordenable cronológicamente.
 	ID string `json:"id"`
+
+	// ClientEventID es lo que viaja como `client_event_id` para que el cloud
+	// deduplique. Por defecto es el ID; los adaptadores que reciben reenvíos
+	// de la cámara (Dahua reenvía el mismo evento hasta que se le responde
+	// bien) ponen uno derivado del evento, no de la llegada.
+	ClientEventID string `json:"client_event_id,omitempty"`
 
 	// Plate normalizada (uppercase + strip), tal como vino del adapter.
 	Plate string `json:"plate"`
@@ -41,17 +58,29 @@ type QueuedEvent struct {
 	// con el timestamp ORIGINAL (cuando ocurrió, no cuando subimos).
 	Timestamp string `json:"timestamp,omitempty"`
 
-	// Metadata adicional (confidence, vendor-specific fields, etc.).
+	// Confidence tal como la reporta la cámara (0–1 o 0–100: el cloud
+	// normaliza). Puntero para no mandar un cero inventado cuando la cámara
+	// no lo dice.
+	Confidence *float64 `json:"confidence,omitempty"`
+
+	// PlateBox en píxeles de la escena, solo si la cámara lo entrega.
+	PlateBox *PlateBox `json:"plate_box,omitempty"`
+
+	// Metadata adicional (vendor-specific fields, etc.).
 	Metadata map[string]any `json:"metadata,omitempty"`
 
-	// SnapshotMimeType del .bin file. Generalmente "image/jpeg" desde Hikvision
-	// directo. El cloud convierte a WebP server-side via ImageHelper.
+	// SnapshotMimeType del .bin file. Generalmente "image/jpeg". El cloud
+	// convierte a WebP server-side.
 	SnapshotMimeType string `json:"snapshot_mime_type,omitempty"`
 
 	// SnapshotBytes es el tamaño del .bin (informativo + cap defensive).
 	SnapshotBytes int `json:"snapshot_bytes,omitempty"`
 
-	// RetryCount cuenta los intentos fallidos. Sobre 5 → descarta.
+	// RecorteBytes es el tamaño del .crop; cero si no hay recorte.
+	RecorteBytes int `json:"recorte_bytes,omitempty"`
+
+	// RetryCount cuenta los intentos fallidos por causa transitoria (red,
+	// 5xx). Solo sirve para el back-off: nunca descarta.
 	RetryCount int `json:"retry_count"`
 
 	// LastAttemptAt timestamp del último intento (para back-off).
@@ -70,18 +99,29 @@ type QueuedEvent struct {
 // eventos/día con caps absolutos de 10k items/1GB, file system es
 // suficientemente rápido y mucho más simple de inspeccionar/debug.
 type FileQueue struct {
-	dir            string
-	maxItems       int
-	maxBytes       int64
-	mu             sync.Mutex // serializa Enqueue para evitar race en counts
+	dir      string
+	maxItems int
+	maxBytes int64
+	mu       sync.Mutex // serializa Enqueue para evitar race en counts
 }
+
+// Permisos de la cola: las fotos son de personas entrando a su casa (Ley
+// 1581). En el PC de la portería hay más de una cuenta de usuario, y con
+// 0644 cualquiera de ellas podía copiarlas.
+const (
+	permDirCola     = 0o700
+	permArchivoCola = 0o600
+)
 
 // NewFileQueue crea (o reusa) la queue en `dir`. Crea el directorio si no
 // existe. Returns error solo si el filesystem no permite mkdir.
 func NewFileQueue(dir string, maxItems int, maxBytes int64) (*FileQueue, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, permDirCola); err != nil {
 		return nil, fmt.Errorf("creando queue dir %s: %w", dir, err)
 	}
+	// Un directorio que ya existía de una versión anterior se creó con 0755;
+	// se aprieta acá, que es el único sitio que lo abre.
+	_ = os.Chmod(dir, permDirCola)
 	return &FileQueue{
 		dir:      dir,
 		maxItems: maxItems,
@@ -89,13 +129,19 @@ func NewFileQueue(dir string, maxItems int, maxBytes int64) (*FileQueue, error) 
 	}, nil
 }
 
-// Enqueue persiste un nuevo evento + su binario. Si la queue está al cap,
-// descarta los MÁS ANTIGUOS primero (FIFO eviction) y loggea warning.
-//
-// Atomicidad: el .bin y el .json se escriben primero como `.tmp` y luego
-// se renombran (rename atómico en POSIX). El glob de Drain ignora `.tmp`,
-// así que un evento parcialmente escrito nunca se procesa.
+// Enqueue persiste un nuevo evento + su escena. Ver EnqueueConRecorte.
 func (q *FileQueue) Enqueue(ev *QueuedEvent, snapshot []byte) error {
+	return q.EnqueueConRecorte(ev, snapshot, nil)
+}
+
+// EnqueueConRecorte persiste un nuevo evento, su escena y, si viene, el
+// recorte de la placa. Si la queue está al cap, descarta los MÁS ANTIGUOS
+// primero (FIFO eviction) y loggea warning.
+//
+// Atomicidad: los binarios y el .json se escriben primero como `.tmp` y
+// luego se renombran (rename atómico en POSIX). El glob de PeekOldest
+// ignora `.tmp`, así que un evento parcialmente escrito nunca se procesa.
+func (q *FileQueue) EnqueueConRecorte(ev *QueuedEvent, snapshot, recorte []byte) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -109,27 +155,40 @@ func (q *FileQueue) Enqueue(ev *QueuedEvent, snapshot []byte) error {
 		_, _ = rand.Read(rand6)
 		ev.ID = fmt.Sprintf("%020d_%s", time.Now().UnixNano(), hex.EncodeToString(rand6))
 	}
+	if ev.ClientEventID == "" {
+		ev.ClientEventID = ev.ID
+	}
 	ev.SnapshotBytes = len(snapshot)
+	ev.RecorteBytes = len(recorte)
 	if ev.CreatedAt.IsZero() {
 		ev.CreatedAt = time.Now()
 	}
 
-	// 1) Escribir el .bin primero (atomic via rename). Si falla, no creamos
-	// el .json — el evento queda como si no hubiera sido encolado.
+	// 1) Escribir los binarios primero (atomic via rename). Si falla, no
+	// creamos el .json — el evento queda como si no hubiera sido encolado.
 	binPath := filepath.Join(q.dir, ev.ID+".bin")
 	if err := writeFileAtomic(binPath, snapshot); err != nil {
 		return fmt.Errorf("escribiendo snapshot bin: %w", err)
 	}
+	cropPath := filepath.Join(q.dir, ev.ID+".crop")
+	if len(recorte) > 0 {
+		if err := writeFileAtomic(cropPath, recorte); err != nil {
+			_ = os.Remove(binPath)
+			return fmt.Errorf("escribiendo recorte: %w", err)
+		}
+	}
 
-	// 2) Escribir el .json. Si falla, intentar limpiar el .bin.
+	// 2) Escribir el .json. Si falla, intentar limpiar los binarios.
 	jsonPath := filepath.Join(q.dir, ev.ID+".json")
 	data, err := json.MarshalIndent(ev, "", "  ")
 	if err != nil {
 		_ = os.Remove(binPath)
+		_ = os.Remove(cropPath)
 		return fmt.Errorf("serializando event json: %w", err)
 	}
 	if err := writeFileAtomic(jsonPath, data); err != nil {
 		_ = os.Remove(binPath)
+		_ = os.Remove(cropPath)
 		return fmt.Errorf("escribiendo event json: %w", err)
 	}
 
@@ -177,22 +236,30 @@ func (q *FileQueue) PeekOldest(limit int) ([]*QueuedEvent, error) {
 	return out, nil
 }
 
-// Snapshot devuelve el contenido binario asociado al evento. Vacío si el .bin
-// fue borrado externamente (raro — sería un .json huérfano).
+// Snapshot devuelve la escena asociada al evento. Error si el .bin fue
+// borrado externamente (raro — sería un .json huérfano).
 func (q *FileQueue) Snapshot(eventID string) ([]byte, error) {
-	binPath := filepath.Join(q.dir, eventID+".bin")
-	return os.ReadFile(binPath)
+	return os.ReadFile(filepath.Join(q.dir, eventID+".bin"))
 }
 
-// Delete borra atómicamente .json + .bin del evento. Llamar tras éxito al
-// reenviar al cloud o tras 5 retry fallidos (descarte definitivo).
+// Recorte devuelve el recorte de placa del evento, o nil si no lo hay. Que
+// falte no es error: la mayoría de cámaras solo manda la escena.
+func (q *FileQueue) Recorte(eventID string) []byte {
+	data, err := os.ReadFile(filepath.Join(q.dir, eventID+".crop"))
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// Delete borra .json + binarios del evento. Llamar tras éxito al reenviar
+// al cloud o tras un rechazo permanente (4xx).
 //
 // No es error si los archivos ya no existen (idempotente).
 func (q *FileQueue) Delete(eventID string) error {
-	binPath := filepath.Join(q.dir, eventID+".bin")
-	jsonPath := filepath.Join(q.dir, eventID+".json")
-	_ = os.Remove(binPath)
-	if err := os.Remove(jsonPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	_ = os.Remove(filepath.Join(q.dir, eventID+".bin"))
+	_ = os.Remove(filepath.Join(q.dir, eventID+".crop"))
+	if err := os.Remove(filepath.Join(q.dir, eventID+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -234,7 +301,7 @@ func (q *FileQueue) Stats() (items int, bytes int64, oldestAge time.Duration) {
 				oldest = info.ModTime()
 			}
 			bytes += info.Size()
-		case ".bin":
+		case ".bin", ".crop":
 			bytes += info.Size()
 		}
 	}
@@ -295,7 +362,7 @@ func (q *FileQueue) readEvent(jsonFilename string) (*QueuedEvent, error) {
 // internamente con la API moderna desde Go 1.5+).
 func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, permArchivoCola); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
