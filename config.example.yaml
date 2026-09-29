@@ -4,16 +4,16 @@
 # estos valores — útil para CI / Windows Service con env vars seguras.
 
 cloud:
-  # El dominio del conjunto.
+  # La API del conjunto (el instalador la pone desde el bloque del panel).
   base_url: https://TU_CONJUNTO.porteriaplus.com
 
-  # La LLAVE DEL CONJUNTO. Se crea en «Integraciones y API keys» con los
-  # permisos access:events, access:whitelist y access:heartbeat. Puede ser la
-  # misma para todos los agents del conjunto.
+  # La LLAVE DEL CONJUNTO (`ppk_…`). Se crea en «Integraciones y API keys» con
+  # los permisos access:events, access:whitelist y access:heartbeat. Puede ser
+  # la misma para todos los agents del conjunto.
   token: ppk_PEGA_AQUI_LA_LLAVE_DEL_CONJUNTO
 
-  # El TOKEN DE ESTA CÁMARA. El panel lo muestra UNA sola vez al registrarla;
-  # si se pierde, se regenera desde ahí y el anterior deja de servir.
+  # El TOKEN DE ESTA CÁMARA (`ppd_…`). El panel lo muestra UNA sola vez al
+  # registrarla; si se pierde, se regenera desde ahí y el anterior deja de servir.
   #
   # No es opcional en la práctica: sin él, el cloud atribuye las lecturas al
   # primer dispositivo del conjunto. En una portería con cámara de entrada Y de
@@ -24,23 +24,28 @@ cloud:
 
 camera:
   # Marca de la cámara. Valores aceptados: hikvision | dahua | axis.
-  # Si tu cámara está en el catálogo del cloud (/integrations), el script de
-  # instalación pre-rellena este campo según el modelo que el admin eligió.
+  # El instalador lo pre-rellena según el modelo que el admin eligió en el panel.
   type: hikvision
 
-  # Familia/línea específica dentro de la marca. Solo es necesaria cuando un
-  # vendor tiene múltiples líneas con endpoints distintos. Valores:
+  # Familia/línea específica dentro de la marca. Solo hace falta cuando un
+  # vendor tiene varias líneas con endpoints distintos. Valores:
   #
-  #   hikvision_traffic — línea profesional (iDS-2CD7A26G0, iDS-TCM403-MA, ...)
-  #   hikvision_itc     — línea ITC Entrance (DS-TCG405-E, DS-TCG411-E, ...)
-  #   dahua_itc         — Dahua Intelligent Traffic Camera (ITC215, ITC237, ...)
-  #   axis_vapix        — Axis con ACAP "License Plate Verifier" instalado.
+  #   hikvision_traffic    — línea profesional (iDS-2CD7A26G0, iDS-TCM403-MA, ...)
+  #                          escribe en /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo
+  #   hikvision_itc        — línea ITC Entrance (DS-TCG405-E, DS-TCG411-E, ...)
+  #                          y firmwares viejos: /ISAPI/ITC/Entrance/VCL
+  #   hikvision_anpr_audit — firmwares recientes (7A26): /ISAPI/Traffic/channels/1/licensePlateAuditData
+  #   dahua_itc            — Dahua ITC (ITC215, ITC237, ...). Recibe lecturas; la
+  #                          escritura de la lista NO está confirmada (ver README).
+  #   axis_vapix           — Axis con ACAP "License Plate Verifier" instalado.
   #
-  # Si lo dejas vacío y `type: hikvision`, asume `hikvision_traffic` (más común
-  # en producción hoy). Si `type: dahua` → `dahua_itc`. Si `type: axis` → `axis_vapix`.
+  # Cuál de las tres de Hikvision acepta una cámara concreta se confirma con la
+  # cámara al lado (README, «Hikvision: tres endpoints»). Vacío y `type:
+  # hikvision` → `hikvision_traffic`; `dahua` → `dahua_itc`; `axis` → `axis_vapix`.
   family: ""
 
-  # IP local de la cámara (red privada del conjunto).
+  # IP local de la cámara (red privada del conjunto). Es también la única IP
+  # desde la que el receiver acepta lecturas (ver receiver.allow_from).
   host: 192.168.1.50
   # Puerto HTTP de la cámara (80 por default).
   port: 80
@@ -50,8 +55,8 @@ camera:
   password: CAMBIA_ESTO
 
   # Si true (default), el agent acepta auto-reconfigurarse cuando el admin
-  # cambia el modelo de la cámara en el panel /integrations. El cloud reporta
-  # la nueva familia en heartbeat/whitelist y el agent se ajusta sin reiniciar.
+  # cambia el modelo de la cámara en el panel. El cloud reporta la nueva
+  # familia con el whitelist y el agent se ajusta sin reiniciar.
   # Pon a false si quieres pin manual de la familia.
   auto_config: true
 
@@ -60,45 +65,55 @@ poll:
   interval_seconds: 60
 
 log:
-  # Ruta del log file. Si es relativo, va junto al binario.
+  # Ruta del log. Si es relativa, va junto a este config.yaml. Vacía → solo
+  # la salida estándar (lo que captura el gestor de servicios).
   file: agent.log
   # Niveles: debug | info | warn | error
   level: info
+  # Rotación por tamaño: al pasar de max_size_mb se renombra a .1, .2… y se
+  # conservan `keep` copias. Sin esto el log crecía sin techo durante años.
+  max_size_mb: 10
+  keep: 3
 
-# Receiver — captura visual del vehículo (v0.2.0+). Cuando enabled=true,
-# el agent levanta un HTTP server local en :8787 al que la cámara LPR
-# puede postear el snapshot + metadata cada vez que detecte una placa.
-# El agent encola el evento localmente y lo reenvía al cloud, sobreviviendo
-# outages de internet (queue persistente con back-off exponencial).
+# Receiver — captura visual del vehículo. Encendido de fábrica: el agent
+# levanta un HTTP server local en :8787 al que la cámara postea la foto y la
+# placa cada vez que lee una. El agent encola el evento localmente y lo
+# reenvía al cloud, sobreviviendo cortes de internet (cola persistente con
+# back-off acotado a 5 minutos; nada se descarta por falta de red).
 #
-# La cámara debe configurarse para postear a:
-#   http://<IP_DEL_PC_PORTERO>:8787/lpr-event
-# con header X-Agent-Source acorde a su familia (hikvision, hikvision_itc,
-# dahua, dahua_itc, axis, axis_vapix). Si la cámara no permite headers
-# custom, usa X-Agent-Source: generic con JSON estándar.
-#
-# Para upgrade desde v0.1.x: si esta sección NO existe en el yaml, el agent
-# corre solo como puller (whitelist+heartbeat) — comportamiento legacy.
+# La cámara se configura para postear a (según marca):
+#   Hikvision (HTTP Listening, multipart):  http://<IP_DEL_PC_PORTERO>:8787/lpr-event
+#   Dahua (ITSAPI push, JSON):              http://<IP_DEL_PC_PORTERO>:8787/NotificationInfo/TollgateInfo
+#   Axis (License Plate Verifier, JSON):    http://<IP_DEL_PC_PORTERO>:8787/axis-event
+#   Integradores propios (multipart):       /lpr-event con X-Agent-Source: generic
 receiver:
+  # false apaga la captura visual: el agent corre solo como puller
+  # (whitelist + heartbeat).
   enabled: true
 
   # Dirección donde escucha el HTTP server. 0.0.0.0 = LAN-accesible (cámara
-  # en otra IP de la LAN). 127.0.0.1 = solo localhost (cámara y agent en
-  # mismo PC). Puerto 8787 por default — cambiar si conflictúa con otro servicio.
+  # en otra IP de la LAN). Puerto 8787 por default.
   bind_address: 0.0.0.0:8787
 
+  # Quién puede postear lecturas. Siempre se acepta camera.host; acá van IPs
+  # o redes CIDR adicionales (p. ej. una segunda cámara, o 127.0.0.1 para
+  # probar con curl desde el mismo PC). Cualquier otro origen recibe 403:
+  # una lectura falsa posteada desde otro PC de la LAN abriría una visita
+  # en el panel con una foto inventada.
+  allow_from: []
+  # true apaga el filtro. Solo para diagnosticar, y volver a false.
+  allow_any: false
+
   # Directorio donde se persisten los eventos pendientes (queue offline).
-  # Default: <directorio del binario>/queue. Cambiar si el disco es lento o
-  # quieres aislar en otra partición.
+  # Default: <directorio del binario>/queue. Permisos 0700; las fotos 0600.
   queue_dir: queue
 
   # Caps de la queue local. Si se superan, el agent descarta los eventos más
   # antiguos (warning en log). Defaults: 10000 items / 1GB. ~12 días de
-  # outage continuo a 800 eventos/día caben sin descarte.
+  # corte continuo a 800 eventos/día caben sin descarte.
   max_queue_items: 10000
   max_queue_bytes: 1073741824
 
   # Cada cuántos segundos el replay worker intenta drenar la queue. 30s es
-  # responsive sin spam. Subir si el cloud o el internet del conjunto son
-  # consistentemente lentos.
+  # responsive sin spam.
   replay_tick_sec: 30

@@ -4,16 +4,17 @@
 #   make build          → binario para la plataforma actual (./bin/porteria-agent)
 #   make windows        → cross-compile para Windows amd64 (./bin/porteria-agent.exe)
 #   make linux          → cross-compile para Linux amd64
+#   make linux-arm64    → cross-compile para Linux arm64 (Raspberry Pi)
 #   make macos          → cross-compile para macOS arm64 (Apple Silicon)
 #   make all            → todos los anteriores
 #   make clean          → limpia ./bin
-#   make test           → unit tests (cuando existan)
+#   make test           → unit tests
 #   make sha256         → calcula hash SHA-256 del binario Windows (para install.ps1)
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.AgentVersion=$(VERSION)
 
-.PHONY: build windows linux macos all clean test sha256
+.PHONY: build windows linux linux-arm64 macos all clean test sha256
 
 build:
 	@mkdir -p bin
@@ -30,12 +31,17 @@ linux:
 	GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o bin/porteria-agent-linux .
 	@echo "✓ Built ./bin/porteria-agent-linux ($(VERSION))"
 
+linux-arm64:
+	@mkdir -p bin
+	GOOS=linux GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o bin/porteria-agent-linux-arm64 .
+	@echo "✓ Built ./bin/porteria-agent-linux-arm64 ($(VERSION) — Raspberry Pi)"
+
 macos:
 	@mkdir -p bin
 	GOOS=darwin GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o bin/porteria-agent-macos .
 	@echo "✓ Built ./bin/porteria-agent-macos ($(VERSION))"
 
-all: windows linux macos
+all: windows linux linux-arm64 macos
 	@echo "✓ Built all platforms"
 
 clean:

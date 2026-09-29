@@ -4,8 +4,9 @@ name: release
 # en una GitHub Release. Trigger: push de un tag `agent-v*` (ej. `agent-v0.1.0`)
 # o `workflow_dispatch` manual (smoke testing sin tag).
 #
-# El admin del conjunto descarga el .exe desde la URL del release:
-#   https://github.com/rguzman46/porteria-sync-agent/releases/latest/download/porteria-agent.exe
+# El install.ps1 de cada release descarga el .exe de ESA release (la URL
+# lleva el tag): nunca `latest`, para que una portería quede con la versión
+# que se probó contra la plataforma y no con la que se publique mañana.
 #
 # El SHA-256 del binario Windows se inyecta en `install.ps1` reemplazando
 # el placeholder `__EXPECTED_HASH__` para que el script verifique
@@ -33,6 +34,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          check-latest: true
 
       - name: Determinar versión
         id: version
@@ -56,6 +58,8 @@ jobs:
 
           GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/porteria-agent.exe .
           GOOS=linux   GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/porteria-agent-linux-amd64 .
+          # Raspberry Pi 3/4/5 con SO de 64 bits: el PC de portería más barato.
+          GOOS=linux   GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o bin/porteria-agent-linux-arm64 .
           GOOS=darwin  GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o bin/porteria-agent-macos-arm64 .
 
           ls -lah bin/
@@ -66,15 +70,18 @@ jobs:
         run: |
           WIN_HASH=$(sha256sum porteria-agent.exe | awk '{print $1}')
           LINUX_HASH=$(sha256sum porteria-agent-linux-amd64 | awk '{print $1}')
+          ARM_HASH=$(sha256sum porteria-agent-linux-arm64 | awk '{print $1}')
           MAC_HASH=$(sha256sum porteria-agent-macos-arm64 | awk '{print $1}')
 
           echo "win=${WIN_HASH}" >> "$GITHUB_OUTPUT"
           echo "linux=${LINUX_HASH}" >> "$GITHUB_OUTPUT"
+          echo "arm=${ARM_HASH}" >> "$GITHUB_OUTPUT"
           echo "mac=${MAC_HASH}" >> "$GITHUB_OUTPUT"
 
           cat > SHA256SUMS.txt <<EOF
           ${WIN_HASH}  porteria-agent.exe
           ${LINUX_HASH}  porteria-agent-linux-amd64
+          ${ARM_HASH}  porteria-agent-linux-arm64
           ${MAC_HASH}  porteria-agent-macos-arm64
           EOF
           cat SHA256SUMS.txt
@@ -103,6 +110,7 @@ jobs:
             **Binarios**:
             - Windows amd64: `porteria-agent.exe` — SHA-256 `${{ steps.hashes.outputs.win }}`
             - Linux amd64: `porteria-agent-linux-amd64` — SHA-256 `${{ steps.hashes.outputs.linux }}`
+            - Linux arm64 (Raspberry Pi): `porteria-agent-linux-arm64` — SHA-256 `${{ steps.hashes.outputs.arm }}`
             - macOS arm64: `porteria-agent-macos-arm64` — SHA-256 `${{ steps.hashes.outputs.mac }}`
 
             **Scripts** (Windows):
@@ -114,6 +122,7 @@ jobs:
           files: |
             bin/porteria-agent.exe
             bin/porteria-agent-linux-amd64
+            bin/porteria-agent-linux-arm64
             bin/porteria-agent-macos-arm64
             bin/install.ps1
             bin/uninstall.ps1

@@ -2,42 +2,56 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
-// AxisVapixAdapter integra con cámaras Axis vía VAPIX (Video API for X)
-// + el ACAP "AXIS License Plate Verifier" que debe estar pre-instalado en
-// la cámara con licencia activa.
+// AxisVapixAdapter integra con cámaras Axis vía VAPIX + el ACAP «AXIS License
+// Plate Verifier», que debe estar instalado en la cámara con licencia activa.
 //
 // Modelos soportados (familia `axis_vapix`):
 //   - P3265-LVE — bullet 2MP outdoor con LPR ACAP.
 //   - Q1700-LE — box camera profesional para vías y parqueaderos.
 //
-// IMPORTANTE: Axis requiere comprar la licencia ACAP por separado
-// (~$80-200 USD por cámara). Sin ACAP, la cámara NO hace OCR de placas
-// — solo es CCTV regular. El admin debe verificar instalación antes
-// de configurar este adapter.
+// IMPORTANTE: Axis requiere comprar la licencia ACAP por separado. Sin ACAP,
+// la cámara NO hace OCR de placas — solo es CCTV regular.
 //
-// Endpoints VAPIX relevantes:
+// API de listas del ACAP (fuente:
+// https://developer.axis.com/vapix/applications/license-plate-verifier-api/):
 //
-//	GET  /axis-cgi/basicdeviceinfo.cgi              — info del device (health)
-//	POST /local/lpv/.api?json=1                     — API del ACAP LPV
-//	     {"apiVersion":"1.0","method":"addAllowlist","params":{"plate":"ABC123"}}
-//	     {"apiVersion":"1.0","method":"clearAllowlist"}
+//	GET  /axis-cgi/basicdeviceinfo.cgi                                   — info del device (health)
+//	GET  /local/fflprapp/api.cgi?api=addplate&plate=<texto>,<fecha>,<desc>&list=<lista>
+//	GET  /local/fflprapp/api.cgi?api=delplate&plate=<texto>&list=<lista>
+//	GET  /local/fflprapp/api.cgi?api=export<lista>
+//	POST /local/fflprapp/<lista>.cgi                                     — importación masiva
 //
-// Auth: Digest por default (algunos firmwares aceptan Basic via flag config).
-// Mismo helper digestClient que Hikvision/Dahua.
+// Las listas son `allowlist` y `blocklist`. El endpoint `/local/lpv/.api`
+// que usaba la versión anterior no aparece en esa documentación y se
+// reemplazó.
+//
+// Estrategia de sincronización: `addplate` por cada placa que debe estar y
+// `delplate` por cada una que estaba en el push anterior y ya no. Es
+// idempotente por placa (la cámara acepta re-agregar) y usa solo llamadas
+// documentadas. La conciliación completa contra lo que la cámara tiene de
+// verdad necesita `export<lista>`, cuyo formato de salida hay que confirmar
+// con la cámara al lado; hasta entonces, el primer push tras un reinicio del
+// agente no borra lo que otro haya metido a mano.
+//
+// Auth: Digest por default. Mismo helper digestClient que Hikvision.
 type AxisVapixAdapter struct {
 	host     string
 	port     int
 	user     string
 	password string
 	digest   *digestClient
+
+	mu       sync.Mutex
+	anterior map[string]map[string]bool // lista → placas del último push exitoso
 }
 
 func NewAxisVapixAdapter(host string, port int, user, password string) *AxisVapixAdapter {
@@ -48,10 +62,16 @@ func NewAxisVapixAdapter(host string, port int, user, password string) *AxisVapi
 		user:     user,
 		password: password,
 		digest:   newDigestClient(user, password, httpClient),
+		anterior: map[string]map[string]bool{},
 	}
 }
 
 func (a *AxisVapixAdapter) Name() string { return "axis_vapix" }
+
+// Capacidades: el ACAP tiene `allowlist` y `blocklist` con la misma API.
+func (a *AxisVapixAdapter) Capacidades() Capacidades {
+	return Capacidades{Whitelist: true, Blocklist: true}
+}
 
 func (a *AxisVapixAdapter) Ping(ctx context.Context) error {
 	// basicdeviceinfo.cgi NO requiere ACAP — funciona en cualquier cámara
@@ -72,81 +92,77 @@ func (a *AxisVapixAdapter) Ping(ctx context.Context) error {
 	return nil
 }
 
-// SyncWhitelist empuja la lista a la cámara vía API del ACAP LPV.
-// Estrategia: clearAllowlist + addAllowlist por placa (LPV no soporta
-// bulk upload). Mismo trade-off que Dahua — optimizar a diff en V2 si
-// conjuntos grandes lo necesitan.
-func (a *AxisVapixAdapter) SyncWhitelist(ctx context.Context, plates []Plate) error {
-	// 1. Clear: vaciar la allowlist actual.
-	if err := a.callLPV(ctx, lpvRequest{
-		APIVersion: "1.0",
-		Method:     "clearAllowlist",
-	}); err != nil {
-		return fmt.Errorf("clearAllowlist: %w", err)
+// SyncWhitelist sincroniza `allowlist` y `blocklist` del ACAP.
+func (a *AxisVapixAdapter) SyncWhitelist(ctx context.Context, plates []Plate, blocked []Plate) error {
+	if err := a.sincronizarLista(ctx, "allowlist", plates); err != nil {
+		return err
 	}
+	return a.sincronizarLista(ctx, "blocklist", blocked)
+}
 
-	// 2. Insert: una request por placa.
-	failed := 0
-	for _, p := range plates {
-		params := map[string]any{
-			"plate": p.Plate,
-		}
-		if p.Owner != "" {
-			params["description"] = truncateStr(p.Owner, 64)
-		}
-		if p.ValidUntil != "" {
-			params["expiry"] = p.ValidUntil // ISO 8601 — LPV lo acepta nativo
-		}
+func (a *AxisVapixAdapter) sincronizarLista(ctx context.Context, lista string, deseadas []Plate) error {
+	a.mu.Lock()
+	previas := a.anterior[lista]
+	a.mu.Unlock()
 
-		err := a.callLPV(ctx, lpvRequest{
-			APIVersion: "1.0",
-			Method:     "addAllowlist",
-			Params:     params,
-		})
-		if err != nil {
-			failed++
-			if failed > 10 {
-				return fmt.Errorf("demasiados fallos en addAllowlist (%d): última: %w", failed, err)
+	actuales := make(map[string]bool, len(deseadas))
+	fallos := 0
+	var ultimo error
+	for _, p := range deseadas {
+		actuales[p.Plate] = true
+		if err := a.addplate(ctx, lista, p); err != nil {
+			fallos++
+			ultimo = err
+			if fallos > 10 {
+				return fmt.Errorf("demasiados fallos en addplate (%d) en %s: última: %w", fallos, lista, err)
 			}
 		}
 	}
-	if failed > 0 {
-		return fmt.Errorf("%d placas no se pudieron añadir a Axis LPV (de %d totales)", failed, len(plates))
+	for placa := range previas {
+		if actuales[placa] {
+			continue
+		}
+		if err := a.delplate(ctx, lista, placa); err != nil {
+			fallos++
+			ultimo = err
+		}
 	}
+	if fallos > 0 {
+		return fmt.Errorf("%d placas no se pudieron sincronizar en %s de Axis (de %d): %w", fallos, lista, len(deseadas), ultimo)
+	}
+	a.mu.Lock()
+	a.anterior[lista] = actuales
+	a.mu.Unlock()
 	return nil
 }
 
-// lpvRequest es la estructura JSON-RPC que espera la API del ACAP
-// AXIS License Plate Verifier.
-type lpvRequest struct {
-	APIVersion string         `json:"apiVersion"`
-	Method     string         `json:"method"`
-	Params     map[string]any `json:"params,omitempty"`
+// addplate agrega una placa. El campo `<fecha>` del API es la vigencia; se
+// deja vacío a propósito: su formato no está confirmado y el cloud ya
+// excluye lo vencido, así que la placa sale de la cámara en el siguiente
+// push por `delplate`.
+func (a *AxisVapixAdapter) addplate(ctx context.Context, lista string, p Plate) error {
+	desc := truncateStr(strings.ReplaceAll(p.Owner, ",", " "), 64)
+	q := url.Values{}
+	q.Set("api", "addplate")
+	q.Set("plate", p.Plate+",,"+desc)
+	q.Set("list", lista)
+	return a.llamarAPI(ctx, "addplate", q)
 }
 
-type lpvResponse struct {
-	APIVersion string `json:"apiVersion"`
-	Method     string `json:"method"`
-	Error      *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
+func (a *AxisVapixAdapter) delplate(ctx context.Context, lista, placa string) error {
+	q := url.Values{}
+	q.Set("api", "delplate")
+	q.Set("plate", placa)
+	q.Set("list", lista)
+	return a.llamarAPI(ctx, "delplate", q)
 }
 
-func (a *AxisVapixAdapter) callLPV(ctx context.Context, payload lpvRequest) error {
-	body, err := json.Marshal(payload)
+func (a *AxisVapixAdapter) llamarAPI(ctx context.Context, que string, q url.Values) error {
+	u := fmt.Sprintf("http://%s:%d/local/fflprapp/api.cgi?%s", a.host, a.port, q.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
-
-	u := fmt.Sprintf("http://%s:%d/local/lpv/.api?json=1", a.host, a.port)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
 	resp, err := a.digest.Do(req)
 	if err != nil {
 		return err
@@ -155,18 +171,14 @@ func (a *AxisVapixAdapter) callLPV(ctx context.Context, payload lpvRequest) erro
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("ACAP LPV no instalado en la cámara (404 en /local/lpv/.api). Instala 'AXIS License Plate Verifier' desde Apps en la web admin antes de usar este adapter")
+		return fmt.Errorf("ACAP License Plate Verifier no instalado en la cámara (404 en /local/fflprapp/). Instálalo desde Apps en la web admin antes de usar este adapter")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s status %d: %s", payload.Method, resp.StatusCode, respBody)
+		return fmt.Errorf("%s status %d: %s", que, resp.StatusCode, respBody)
 	}
-
-	// Validar formato JSON-RPC del ACAP. Si el body no parsea como JSON
-	// (p.ej. firmware viejo que devuelve text/plain), pasamos por OK siempre
-	// que el status sea 2xx — confiamos en el código HTTP.
-	var parsed lpvResponse
-	if err := json.Unmarshal(respBody, &parsed); err == nil && parsed.Error != nil {
-		return fmt.Errorf("%s rechazado por LPV (code=%d): %s", payload.Method, parsed.Error.Code, parsed.Error.Message)
+	// El ACAP responde 200 también cuando rechaza; el cuerpo lo dice.
+	if strings.Contains(strings.ToLower(string(respBody)), "error") {
+		return fmt.Errorf("%s rechazado por el ACAP: %s", que, strings.TrimSpace(string(respBody)))
 	}
 	return nil
 }

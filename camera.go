@@ -8,12 +8,12 @@ import (
 
 // CameraAdapter es la abstracción común sobre cualquier vendor de cámara LPR.
 // Cada adapter sabe cómo hablar con su hardware específico para sincronizar
-// la lista de placas permitidas.
+// las listas de placas.
 //
-// La interfaz es minimalista por diseño: V1 sólo necesita PUSH del whitelist
-// completo. Los eventos (placa detectada → apertura) la cámara los maneja
-// localmente con la whitelist sincronizada. Si el cloud está caído, la
-// portería sigue operando — esa es la razón fundamental del módulo.
+// La interfaz es minimalista por diseño: solo hace falta PUSH de las listas
+// completas. Los eventos (placa detectada → apertura) la cámara los maneja
+// localmente con la lista sincronizada. Si el cloud está caído, la portería
+// sigue operando — esa es la razón fundamental del módulo.
 type CameraAdapter interface {
 	// Name identifica el adapter para logs (ej. "hikvision_traffic",
 	// "hikvision_itc", "dahua_itc", "axis_vapix").
@@ -23,39 +23,43 @@ type CameraAdapter interface {
 	// del agent para fallar rápido si la cámara no es alcanzable.
 	Ping(ctx context.Context) error
 
-	// SyncWhitelist empuja la lista completa de placas autorizadas a la
-	// cámara. La implementación debe ser idempotente: si las mismas placas
-	// ya están en la cámara, no debe causar churn ni reset de estado.
+	// Capacidades dice qué listas sabe escribir este adaptador de verdad.
+	// Un adaptador cuyo endpoint no está confirmado contra una cámara
+	// física reporta `false` y el agente no intenta el push: es preferible
+	// que el panel diga «esta cámara no recibe la lista» a que diga que sí
+	// y no sea cierto.
+	Capacidades() Capacidades
+
+	// SyncWhitelist empuja las placas permitidas y las negadas a la cámara.
+	// La implementación debe ser idempotente: si las mismas placas ya están
+	// en la cámara, no debe causar churn ni reset de estado.
 	//
-	// Estrategia recomendada por implementación: GET current list → diff →
-	// PUSH solo cambios. Si el vendor no soporta diff, replace completo
-	// (caso Hikvision ISAPI v2).
-	SyncWhitelist(ctx context.Context, plates []Plate) error
+	// `blocked` se escribe como lista negra donde el vendor la tiene; si
+	// `Capacidades().Blocklist` es false, se ignora.
+	SyncWhitelist(ctx context.Context, plates []Plate, blocked []Plate) error
 }
 
 // resolveVendorFamily determina qué adapter exacto cargar.
 //
-// V1.3 introduce el concepto de "familia" (sub-vendor) además de la marca.
-// Hikvision tiene dos líneas con endpoints ISAPI distintos:
-//   - hikvision_traffic — línea profesional (iDS-*, DS-2CD7*).
-//   - hikvision_itc     — línea entrada/salida residencial (DS-TCG*).
+// Hikvision tiene tres formas de recibir la lista según la línea y el
+// firmware:
+//   - hikvision_traffic    — `/ISAPI/Traffic/channels/1/vehicleDetect/plateInfo`.
+//   - hikvision_itc        — `/ISAPI/ITC/Entrance/VCL` (DS-TCG*, firmwares viejos).
+//   - hikvision_anpr_audit — `/ISAPI/Traffic/channels/1/licensePlateAuditData`
+//     (firmwares recientes, p. ej. iDS-2CD7A26).
 //
 // Resolución (en orden de prioridad):
 //
 //  1. Si `cfg.Camera.Family` está seteado, ganar (override explícito).
-//  2. Si el cloud envió `vendor_family` en heartbeat/whitelist, usarlo
-//     (auto-config dinámico desde el panel admin — sin reinstalar).
+//  2. Si el cloud envió `vendor_family` en la respuesta del whitelist,
+//     usarlo (auto-config desde el panel admin — sin reinstalar).
 //  3. Si `cfg.Camera.Type` ya tiene formato vendor_family (contiene `_`),
-//     usarlo tal cual (compat retrocompat con instalaciones nuevas).
+//     usarlo tal cual.
 //  4. Si `cfg.Camera.Type` es solo marca (hikvision, dahua, axis), usar
 //     la familia "default" del vendor:
 //     - hikvision → hikvision_traffic (más común en producción hoy).
 //     - dahua     → dahua_itc.
 //     - axis      → axis_vapix.
-//
-// Esto preserva retrocompat con configs viejas (`type: hikvision`) y a la
-// vez habilita el nuevo modo plug-and-play donde el admin elige el modelo
-// exacto en el UI y el sistema deriva la familia automáticamente.
 func resolveVendorFamily(cfg *Config) string {
 	if f := strings.TrimSpace(strings.ToLower(cfg.Camera.Family)); f != "" {
 		return f
@@ -82,23 +86,25 @@ func resolveVendorFamily(cfg *Config) string {
 // Centraliza el factory para que el main.go no tenga que conocer cada vendor.
 //
 // Nuevas familias se agregan aquí con un case más, apuntando a su archivo
-// `camera_<family>.go` correspondiente. Mantener orden alfabético por
-// marca para que el diff sea limpio cuando se agrega un vendor.
+// `camera_<family>.go` correspondiente, y en `familiasValidas` de config.go.
 func NewCameraAdapter(cfg *Config) (CameraAdapter, error) {
 	family := resolveVendorFamily(cfg)
+	c := cfg.Camera
 	switch family {
 	// ── Hikvision ────────────────────────────────────────────────
 	case "hikvision_traffic":
-		return NewHikvisionTrafficAdapter(cfg.Camera.Host, cfg.Camera.Port, cfg.Camera.User, cfg.Camera.Password), nil
+		return NewHikvisionTrafficAdapter(c.Host, c.Port, c.User, c.Password), nil
 	case "hikvision_itc":
-		return NewHikvisionITCAdapter(cfg.Camera.Host, cfg.Camera.Port, cfg.Camera.User, cfg.Camera.Password), nil
+		return NewHikvisionITCAdapter(c.Host, c.Port, c.User, c.Password), nil
+	case "hikvision_anpr_audit":
+		return NewHikvisionAuditAdapter(c.Host, c.Port, c.User, c.Password), nil
 	// ── Dahua ────────────────────────────────────────────────────
 	case "dahua_itc":
-		return NewDahuaITCAdapter(cfg.Camera.Host, cfg.Camera.Port, cfg.Camera.User, cfg.Camera.Password), nil
+		return NewDahuaITCAdapter(c.Host, c.Port, c.User, c.Password), nil
 	// ── Axis ─────────────────────────────────────────────────────
 	case "axis_vapix":
-		return NewAxisVapixAdapter(cfg.Camera.Host, cfg.Camera.Port, cfg.Camera.User, cfg.Camera.Password), nil
+		return NewAxisVapixAdapter(c.Host, c.Port, c.User, c.Password), nil
 	default:
-		return nil, fmt.Errorf("familia de cámara no soportada: %q (tipo=%q). Familias válidas: hikvision_traffic, hikvision_itc, dahua_itc, axis_vapix", family, cfg.Camera.Type)
+		return nil, fmt.Errorf("familia de cámara no soportada: %q (tipo=%q). Familias válidas: %s", family, cfg.Camera.Type, listaDeFamilias())
 	}
 }

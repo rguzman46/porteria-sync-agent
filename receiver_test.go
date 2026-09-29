@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net"
@@ -26,7 +27,8 @@ func newTestReceiver(t *testing.T) (*Receiver, *FileQueue, func()) {
 		t.Fatalf("queue: %v", err)
 	}
 	cfg := &Config{}
-	cfg.Receiver.Enabled = true
+	// httptest.NewRequest pone RemoteAddr 192.0.2.1: esa es «la cámara».
+	cfg.Camera.Host = "192.0.2.1"
 	cfg.Receiver.BindAddress = "127.0.0.1:0" // puerto libre
 	cfg.Receiver.QueueDir = dir
 	cfg.Receiver.MaxQueueItems = 100
@@ -213,7 +215,7 @@ func TestHikvisionAdapterParsesValidAlert(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/lpr-event", buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	ev, snapshot, err := parseHikvisionMultipart(req)
+	ev, snapshot, _, err := parseHikvisionMultipart(req)
 	if err != nil {
 		t.Fatalf("parseHikvisionMultipart: %v", err)
 	}
@@ -235,8 +237,9 @@ func TestHikvisionAdapterParsesValidAlert(t *testing.T) {
 }
 
 func TestHikvisionAdapterIgnoresMultipleImages(t *testing.T) {
-	// Hikvision a veces manda escena + crop placa + face. Solo tomamos la primera
-	// (decisión Habeas Data: nunca rostros).
+	// Hikvision manda escena + recorte de placa + (si lo dejan activo) rostro.
+	// La escena y el recorte se identifican por nombre; el rostro nunca se
+	// guarda (Habeas Data).
 	xml := `<EventNotificationAlert><eventType>ANPR</eventType><ANPR><licensePlate>XYZ789</licensePlate></ANPR></EventNotificationAlert>`
 
 	buf := &bytes.Buffer{}
@@ -262,12 +265,15 @@ func TestHikvisionAdapterIgnoresMultipleImages(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/lpr-event", buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	_, snapshot, err := parseHikvisionMultipart(req)
+	_, snapshot, recorte, err := parseHikvisionMultipart(req)
 	if err != nil {
 		t.Fatalf("parseHikvisionMultipart: %v", err)
 	}
 	if string(snapshot) != "imagen-scene" {
-		t.Errorf("snapshot=%q, esperaba la PRIMERA imagen (scene)", snapshot)
+		t.Errorf("snapshot=%q, esperaba la escena", snapshot)
+	}
+	if string(recorte) != "imagen-plate-crop" {
+		t.Errorf("recorte=%q, esperaba el recorte de placa", recorte)
 	}
 }
 
@@ -285,9 +291,9 @@ func TestHikvisionAdapterRejectsNonANPR(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/lpr-event", buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	_, _, err := parseHikvisionMultipart(req)
-	if err == nil {
-		t.Errorf("esperaba error por eventType!=ANPR, no recibí ninguno")
+	_, _, _, err := parseHikvisionMultipart(req)
+	if !errors.Is(err, errEventoIgnorado) {
+		t.Errorf("esperaba errEventoIgnorado por eventType!=ANPR, recibí %v", err)
 	}
 }
 
@@ -296,7 +302,7 @@ func TestReceiverEndToEndOverTCP(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := NewFileQueue(dir, 100, 100*1024*1024)
 	cfg := &Config{}
-	cfg.Receiver.Enabled = true
+	cfg.Camera.Host = "127.0.0.1"
 	cfg.Receiver.QueueDir = dir
 	cfg.Receiver.MaxQueueItems = 100
 	cfg.Receiver.MaxQueueBytes = 100 * 1024 * 1024

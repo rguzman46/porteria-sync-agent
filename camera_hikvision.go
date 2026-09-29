@@ -20,17 +20,17 @@ import (
 //
 // Endpoints relevantes para LPR Traffic:
 //
-//	POST /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo       — añadir placa
 //	PUT  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo       — reemplazar lista completa
 //	GET  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo       — leer lista actual
-//	DEL  /ISAPI/Traffic/channels/1/vehicleDetect/plateInfo/{id}  — quitar placa
 //
-// Para la línea ITC Entrance (DS-TCG*) ver `camera_hikvision_itc.go` — usa
-// un endpoint distinto (`/ISAPI/ITC/Entrance/VCL`) y formato XML levemente
-// diferente.
+// Los firmwares recientes (p. ej. 7A26) exponen además
+// `licensePlateAuditData` con permitidas y negadas en un solo archivo: ver
+// `camera_hikvision_audit.go` (familia `hikvision_anpr_audit`). Para la
+// línea ITC Entrance (DS-TCG*) ver `camera_hikvision_itc.go`. Cuál de los
+// tres acepta una cámara concreta se confirma con la cámara al lado
+// (README, «Hikvision: tres endpoints»).
 //
-// Auth: HTTP Digest (estándar Hikvision). Los Hikvision modernos también
-// aceptan Basic, pero Digest es más seguro y es el default factory.
+// Auth: HTTP Digest (estándar Hikvision).
 type HikvisionTrafficAdapter struct {
 	host     string
 	port     int
@@ -50,21 +50,29 @@ func NewHikvisionTrafficAdapter(host string, port int, user, password string) *H
 	}
 }
 
-func (h *HikvisionTrafficAdapter) Name() string {
-	return "hikvision_traffic"
+func (h *HikvisionTrafficAdapter) Name() string { return "hikvision_traffic" }
+
+// Capacidades: `plateType` distingue permitida (0) de negada (1) en la misma
+// lista, así que las dos viajan en un solo PUT.
+func (h *HikvisionTrafficAdapter) Capacidades() Capacidades {
+	return Capacidades{Whitelist: true, Blocklist: true}
 }
 
 func (h *HikvisionTrafficAdapter) Ping(ctx context.Context) error {
-	// /ISAPI/System/deviceInfo retorna info del device (modelo, firmware).
-	// Es el endpoint estándar para health-check en Hikvision.
-	url := fmt.Sprintf("http://%s:%d/ISAPI/System/deviceInfo", h.host, h.port)
+	return pingHikvision(ctx, h.digest, h.host, h.port)
+}
+
+// pingHikvision usa /ISAPI/System/deviceInfo, presente en TODAS las cámaras
+// Hikvision: el health-check estándar. Compartido por las tres familias.
+func pingHikvision(ctx context.Context, digest *digestClient, host string, port int) error {
+	url := fmt.Sprintf("http://%s:%d/ISAPI/System/deviceInfo", host, port)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := h.digest.Do(req)
+	resp, err := digest.Do(req)
 	if err != nil {
-		return fmt.Errorf("ping a %s: %w", h.host, err)
+		return fmt.Errorf("ping a %s: %w", host, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -75,12 +83,16 @@ func (h *HikvisionTrafficAdapter) Ping(ctx context.Context) error {
 
 // SyncWhitelist envía la lista completa de placas a la cámara via PUT.
 // Hikvision ISAPI v2 acepta XML payload con todas las placas — la cámara
-// reemplaza su whitelist local atomicamente. Operación idempotente:
-// si las placas no cambiaron, no produce side-effects visibles al portero.
-func (h *HikvisionTrafficAdapter) SyncWhitelist(ctx context.Context, plates []Plate) error {
-	xml := buildHikvisionTrafficPlatesXML(plates)
+// reemplaza su lista local atómicamente. Operación idempotente.
+func (h *HikvisionTrafficAdapter) SyncWhitelist(ctx context.Context, plates []Plate, blocked []Plate) error {
+	xml := buildHikvisionTrafficPlatesXML(plates, blocked)
 	url := fmt.Sprintf("http://%s:%d/ISAPI/Traffic/channels/1/vehicleDetect/plateInfo", h.host, h.port)
+	return putXMLHikvision(ctx, h.digest, url, xml, "PUT whitelist")
+}
 
+// putXMLHikvision hace el PUT y traduce un status distinto de 200 a error
+// con el principio del cuerpo, que es donde la cámara dice por qué.
+func putXMLHikvision(ctx context.Context, digest *digestClient, url, xml, que string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(xml))
 	if err != nil {
 		return err
@@ -88,40 +100,47 @@ func (h *HikvisionTrafficAdapter) SyncWhitelist(ctx context.Context, plates []Pl
 	req.Header.Set("Content-Type", "application/xml")
 	req.Header.Set("Accept", "application/xml")
 
-	resp, err := h.digest.Do(req)
+	resp, err := digest.Do(req)
 	if err != nil {
-		return fmt.Errorf("PUT whitelist: %w", err)
+		return fmt.Errorf("%s: %w", que, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("PUT whitelist status %d: %s", resp.StatusCode, snippet)
+		return fmt.Errorf("%s status %d: %s", que, resp.StatusCode, snippet)
 	}
 	return nil
 }
 
 // buildHikvisionTrafficPlatesXML construye el XML para la línea Traffic.
 // Estructura raíz `<PlateInfoList version="2.0">` con elementos `<PlateInfo>`.
-func buildHikvisionTrafficPlatesXML(plates []Plate) string {
+// `plateType` 0 = permitida (whitelist), 1 = negada (blacklist).
+func buildHikvisionTrafficPlatesXML(plates []Plate, blocked []Plate) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
 	b.WriteString(`<PlateInfoList version="2.0">`)
-	for i, p := range plates {
-		fmt.Fprintf(&b, `<PlateInfo><id>%d</id><plateNumber>%s</plateNumber>`, i+1, xmlEscape(p.Plate))
-		// `plateType=0` = whitelist (allowed). `1` = blacklist en Hikvision.
-		b.WriteString(`<plateType>0</plateType>`)
+	id := 0
+	escribir := func(p Plate, plateType int) {
+		id++
+		fmt.Fprintf(&b, `<PlateInfo><id>%d</id><plateNumber>%s</plateNumber><plateType>%d</plateType>`, id, xmlEscape(p.Plate), plateType)
 		if p.ValidUntil != "" {
 			fmt.Fprintf(&b, `<effectivePeriod><endTime>%s</endTime></effectivePeriod>`, xmlEscape(p.ValidUntil))
 		}
 		b.WriteString(`</PlateInfo>`)
+	}
+	for _, p := range plates {
+		escribir(p, 0)
+	}
+	for _, p := range blocked {
+		escribir(p, 1)
 	}
 	b.WriteString(`</PlateInfoList>`)
 	return b.String()
 }
 
 // xmlEscape escapa los 5 chars XML estándar. Compartido por todos los
-// adapters XML (Hikvision Traffic, Hikvision ITC).
+// adapters XML.
 func xmlEscape(s string) string {
 	r := strings.NewReplacer(
 		"&", "&amp;",

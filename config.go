@@ -48,10 +48,11 @@ type Config struct {
 
 		// Family especifica la familia/línea dentro de la marca cuando hay
 		// múltiples con endpoints distintos. Valores:
-		//   hikvision_traffic — línea Traffic (iDS-*, DS-2CD7*).
-		//   hikvision_itc     — línea ITC Entrance (DS-TCG*).
-		//   dahua_itc         — Dahua Intelligent Traffic Camera.
-		//   axis_vapix        — Axis con ACAP License Plate Verifier.
+		//   hikvision_traffic    — línea Traffic (iDS-*, DS-2CD7*), `vehicleDetect/plateInfo`.
+		//   hikvision_itc        — línea ITC Entrance (DS-TCG*), `ITC/Entrance/VCL`.
+		//   hikvision_anpr_audit — firmwares recientes (7A26), `licensePlateAuditData`.
+		//   dahua_itc            — Dahua Intelligent Traffic Camera.
+		//   axis_vapix           — Axis con ACAP License Plate Verifier.
 		// Vacío → derivar del Type.
 		Family string `yaml:"family"`
 
@@ -61,10 +62,10 @@ type Config struct {
 		Password string `yaml:"password"` // ...
 
 		// AutoConfig: si true (default), el agent acepta auto-actualizar la
-		// familia cuando el cloud reporta una distinta en /api/access/whitelist
-		// o /heartbeat. Útil para que el admin pueda cambiar el modelo de
-		// cámara en el panel y el agent se reconfigure sin reinstalación.
-		// Set a false si quieres pin manual (caso debug / cámara experimental).
+		// familia cuando el cloud reporta una distinta en la respuesta del
+		// whitelist o del latido. Útil para que el admin pueda cambiar el
+		// modelo de cámara en el panel y el agent se reconfigure sin
+		// reinstalación. Set a false si quieres pin manual.
 		AutoConfig *bool `yaml:"auto_config"`
 	} `yaml:"camera"`
 
@@ -73,22 +74,48 @@ type Config struct {
 	} `yaml:"poll"`
 
 	Log struct {
-		File  string `yaml:"file"`  // logs/agent.log (relativo al binario)
+		// File es el archivo de log. Relativo → junto al config.yaml (que es
+		// donde vive el binario en una instalación normal). Vacío → solo
+		// stderr (lo que captura el gestor de servicios).
+		File  string `yaml:"file"`
 		Level string `yaml:"level"` // info | debug | warn | error
+		// MaxSizeMB: al superarlo el archivo se rota a `.1`, `.2`… y se
+		// conservan `Keep` copias. Sin esto el log de un PC de portería crecía
+		// sin techo durante años hasta llenar el disco.
+		MaxSizeMB int `yaml:"max_size_mb"` // default 10
+		Keep      int `yaml:"keep"`        // default 3
 	} `yaml:"log"`
 
-	// Receiver — HTTP server local que recibe multipart de la cámara LPR
-	// (Módulo LPR — Día 8, captura visual). La cámara postea aquí; el agent
-	// encola y reenvía al cloud. Si Enabled=false, el agent corre solo como
-	// puller (whitelist sync + heartbeat) — compat backward con v0.1.x.
+	// Receiver — HTTP server local que recibe las lecturas de la cámara LPR
+	// (foto + placa). La cámara postea aquí; el agent encola y reenvía al
+	// cloud. Si Enabled=false, el agent corre solo como puller (whitelist
+	// sync + heartbeat).
 	Receiver struct {
-		Enabled       bool   `yaml:"enabled"`         // default true
-		BindAddress   string `yaml:"bind_address"`    // default 0.0.0.0:8787
-		QueueDir      string `yaml:"queue_dir"`       // default <appdata>/queue
-		MaxQueueItems int    `yaml:"max_queue_items"` // default 10000
-		MaxQueueBytes int64  `yaml:"max_queue_bytes"` // default 1GB
-		ReplayTickSec int    `yaml:"replay_tick_sec"` // default 30
+		// Enabled es puntero para distinguir «no lo pusieron» de «lo apagaron»:
+		// con un bool a secas la ausencia de la sección dejaba el receiver
+		// apagado y la instalación quedaba sin fotos sin que nadie lo notara.
+		Enabled     *bool  `yaml:"enabled"`      // default true
+		BindAddress string `yaml:"bind_address"` // default 0.0.0.0:8787
+		// AllowFrom son las IPs (o redes CIDR) que pueden postear lecturas
+		// además de `camera.host`. AllowAny apaga el filtro: solo para
+		// diagnóstico, porque el puerto escucha en toda la LAN y una lectura
+		// falsa abre una visita en el panel.
+		AllowFrom     []string `yaml:"allow_from"`
+		AllowAny      bool     `yaml:"allow_any"`
+		QueueDir      string   `yaml:"queue_dir"`       // default <dir del binario>/queue
+		MaxQueueItems int      `yaml:"max_queue_items"` // default 10000
+		MaxQueueBytes int64    `yaml:"max_queue_bytes"` // default 1GB
+		ReplayTickSec int      `yaml:"replay_tick_sec"` // default 30
 	} `yaml:"receiver"`
+}
+
+// familiasValidas son las que el factory de camera.go sabe construir.
+var familiasValidas = map[string]bool{
+	"hikvision_traffic":    true,
+	"hikvision_itc":        true,
+	"hikvision_anpr_audit": true,
+	"dahua_itc":            true,
+	"axis_vapix":           true,
 }
 
 // loadConfig lee `configPath` (yaml), aplica overrides de env y devuelve
@@ -197,6 +224,12 @@ func (c *Config) applyDefaults() {
 	if c.Log.File == "" {
 		c.Log.File = "agent.log"
 	}
+	if c.Log.MaxSizeMB == 0 {
+		c.Log.MaxSizeMB = 10
+	}
+	if c.Log.Keep == 0 {
+		c.Log.Keep = 3
+	}
 	c.Camera.Type = strings.ToLower(strings.TrimSpace(c.Camera.Type))
 	c.Camera.Family = strings.ToLower(strings.TrimSpace(c.Camera.Family))
 
@@ -207,9 +240,13 @@ func (c *Config) applyDefaults() {
 		c.Camera.AutoConfig = &t
 	}
 
-	// Receiver defaults — habilitado por default en v0.2.0+. Para deshabilitar
-	// explícitamente (modo legacy v0.1.x sin captura visual), poner
-	// `receiver: { enabled: false }` en el yaml.
+	// Receiver encendido salvo que lo apaguen a propósito con
+	// `receiver: { enabled: false }`. Antes el default real era «apagado» y
+	// una instalación sin la sección quedaba sin fotos.
+	if c.Receiver.Enabled == nil {
+		t := true
+		c.Receiver.Enabled = &t
+	}
 	if c.Receiver.BindAddress == "" {
 		c.Receiver.BindAddress = "0.0.0.0:8787"
 	}
@@ -238,36 +275,47 @@ func (c *Config) validate() error {
 		return fmt.Errorf("cloud.base_url requerido (ej: https://catamaran.porteriaplus.com)")
 	}
 	if c.Cloud.Token == "" {
-		return fmt.Errorf("cloud.token requerido (Bearer del device, generado en /integrations)")
+		return fmt.Errorf("cloud.token requerido (la llave del conjunto, `ppk_…`, de Integraciones y API keys)")
 	}
-	if !strings.HasPrefix(c.Cloud.Token, "pa_") {
-		return fmt.Errorf("cloud.token tiene formato inválido (debe empezar con 'pa_')")
+	// `ppk_` es lo que emite la plataforma actual; `pa_` lo emitía la anterior
+	// y sigue en algunas porterías. Exigir solo `pa_` dejaba a toda instalación
+	// nueva sin arrancar.
+	if !strings.HasPrefix(c.Cloud.Token, "ppk_") && !strings.HasPrefix(c.Cloud.Token, "pa_") {
+		return fmt.Errorf("cloud.token tiene formato inválido (debe empezar con 'ppk_')")
 	}
 	if c.Camera.Host == "" {
 		return fmt.Errorf("camera.host requerido (IP local de la cámara LPR)")
 	}
-	// Validamos contra marca top-level. La familia exacta (hikvision_traffic vs
-	// hikvision_itc) se resuelve después en `resolveVendorFamily` — aquí solo
-	// chequeamos que el vendor sea uno conocido. Si se pasa `family` directo
-	// también lo validamos.
-	switch c.Camera.Type {
-	case "hikvision", "dahua", "axis":
+	// Validamos contra marca top-level. La familia exacta se resuelve después
+	// en `resolveVendorFamily` — aquí solo chequeamos que el vendor sea uno
+	// conocido. Si se pasa `family` directo también lo validamos.
+	switch {
+	case c.Camera.Type == "hikvision", c.Camera.Type == "dahua", c.Camera.Type == "axis":
 		// OK — la familia se resolverá en el factory.
-	case "hikvision_traffic", "hikvision_itc", "dahua_itc", "axis_vapix":
+	case familiasValidas[c.Camera.Type]:
 		// Type ya tiene formato familia — válido directamente.
 	default:
-		return fmt.Errorf("camera.type debe ser uno de: hikvision, dahua, axis (o una familia específica: hikvision_traffic/itc, dahua_itc, axis_vapix). Recibí %q", c.Camera.Type)
+		return fmt.Errorf("camera.type debe ser uno de: hikvision, dahua, axis (o una familia específica: %s). Recibí %q", listaDeFamilias(), c.Camera.Type)
 	}
-	if c.Camera.Family != "" {
-		switch c.Camera.Family {
-		case "hikvision_traffic", "hikvision_itc", "dahua_itc", "axis_vapix":
-			// OK
-		default:
-			return fmt.Errorf("camera.family debe ser una de: hikvision_traffic, hikvision_itc, dahua_itc, axis_vapix. Recibí %q", c.Camera.Family)
-		}
+	if c.Camera.Family != "" && !familiasValidas[c.Camera.Family] {
+		return fmt.Errorf("camera.family debe ser una de: %s. Recibí %q", listaDeFamilias(), c.Camera.Family)
 	}
 	if c.Poll.IntervalSeconds < 30 {
 		return fmt.Errorf("poll.interval_seconds debe ser >= 30 (recibí %d)", c.Poll.IntervalSeconds)
 	}
+	for _, origen := range c.Receiver.AllowFrom {
+		if _, err := parseOrigen(origen); err != nil {
+			return fmt.Errorf("receiver.allow_from: %w", err)
+		}
+	}
 	return nil
+}
+
+// ReceiverEnabled dice si hay que levantar el receptor de fotos.
+func (c *Config) ReceiverEnabled() bool {
+	return c.Receiver.Enabled == nil || *c.Receiver.Enabled
+}
+
+func listaDeFamilias() string {
+	return "hikvision_traffic, hikvision_itc, hikvision_anpr_audit, dahua_itc, axis_vapix"
 }

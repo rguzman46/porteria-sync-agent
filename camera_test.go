@@ -63,7 +63,7 @@ func TestResolveVendorFamilyAxisDefault(t *testing.T) {
 }
 
 func TestFactoryAcceptsAllSupportedFamilies(t *testing.T) {
-	families := []string{"hikvision_traffic", "hikvision_itc", "dahua_itc", "axis_vapix"}
+	families := []string{"hikvision_traffic", "hikvision_itc", "hikvision_anpr_audit", "dahua_itc", "axis_vapix"}
 	for _, f := range families {
 		t.Run(f, func(t *testing.T) {
 			cfg := newCfg("hikvision", f)
@@ -93,7 +93,7 @@ func TestBuildHikvisionTrafficPlatesXML(t *testing.T) {
 		{Plate: "ABC123", ValidUntil: "2026-12-31T23:59:59Z"},
 		{Plate: "DEF456"},
 	}
-	xml := buildHikvisionTrafficPlatesXML(plates)
+	xml := buildHikvisionTrafficPlatesXML(plates, nil)
 
 	mustContain(t, xml, `<PlateInfoList version="2.0">`)
 	mustContain(t, xml, `<plateNumber>ABC123</plateNumber>`)
@@ -107,7 +107,7 @@ func TestBuildHikvisionITCVehicleListXML(t *testing.T) {
 		{Plate: "DSE001", Owner: "Juan", ValidFrom: "2026-05-15T07:00:00", ValidUntil: "2026-05-15T17:00:00"},
 		{Plate: "EMP999"},
 	}
-	xml := buildHikvisionITCVehicleListXML(plates)
+	xml := buildHikvisionITCVehicleListXML(plates, nil)
 
 	mustContain(t, xml, `<VehicleControlList version="2.0">`)
 	mustContain(t, xml, `<plateNumber>DSE001</plateNumber>`)
@@ -125,28 +125,13 @@ func TestTrimZuluForITC(t *testing.T) {
 	cases := map[string]string{
 		"2026-05-15T10:00:00Z":      "2026-05-15T10:00:00",
 		"2026-05-15T10:00:00+00:00": "2026-05-15T10:00:00",
-		"2026-05-15T10:00:00":      "2026-05-15T10:00:00",
-		"":                         "",
+		"2026-05-15T10:00:00":       "2026-05-15T10:00:00",
+		"":                          "",
 	}
 	for in, want := range cases {
 		got := trimZuluForITC(in)
 		if got != want {
 			t.Errorf("trimZuluForITC(%q) = %q, esperado %q", in, got, want)
-		}
-	}
-}
-
-func TestNormalizeDahuaTime(t *testing.T) {
-	cases := map[string]string{
-		"2026-05-15T10:00:00Z":      "2026-05-15 10:00:00",
-		"2026-05-15T10:00:00+00:00": "2026-05-15 10:00:00",
-		"2026-05-15 10:00:00":       "2026-05-15 10:00:00",
-		"":                         "",
-	}
-	for in, want := range cases {
-		got := normalizeDahuaTime(in)
-		if got != want {
-			t.Errorf("normalizeDahuaTime(%q) = %q, esperado %q", in, got, want)
 		}
 	}
 }
@@ -191,7 +176,7 @@ func TestHikvisionITCAdapterSyncWhitelistEndpoint(t *testing.T) {
 	a := NewHikvisionITCAdapter(host, port, "admin", "x")
 	plates := []Plate{{Plate: "TST123", ValidUntil: "2026-12-31T23:59:59Z"}}
 
-	if err := a.SyncWhitelist(testContext(), plates); err != nil {
+	if err := a.SyncWhitelist(testContext(), plates, nil); err != nil {
 		t.Fatalf("SyncWhitelist falló: %v", err)
 	}
 
@@ -244,7 +229,7 @@ func TestAxisAdapterPingEndpoint(t *testing.T) {
 
 func TestAxisAdapterDetectsACAPNotInstalled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/local/lpv/") {
+		if strings.HasPrefix(r.URL.Path, "/local/fflprapp/") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -255,11 +240,11 @@ func TestAxisAdapterDetectsACAPNotInstalled(t *testing.T) {
 	host, port := splitHostPort(t, srv.URL)
 	a := NewAxisVapixAdapter(host, port, "admin", "x")
 
-	err := a.SyncWhitelist(testContext(), []Plate{{Plate: "X"}})
+	err := a.SyncWhitelist(testContext(), []Plate{{Plate: "X"}}, nil)
 	if err == nil {
 		t.Fatal("esperaba error porque ACAP LPV no responde")
 	}
-	if !strings.Contains(err.Error(), "ACAP LPV no instalado") {
+	if !strings.Contains(err.Error(), "no instalado") {
 		t.Errorf("error no indica falta de ACAP: %v", err)
 	}
 }

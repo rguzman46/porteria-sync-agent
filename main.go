@@ -1,7 +1,7 @@
 // porteria-sync-agent — sync agent del módulo LPR de Porteria Plus.
 //
 // Funciones:
-//   - Polling al cloud (/api/access/whitelist) cada N segundos.
+//   - Polling al cloud (/api/v1/access/whitelist) cada N segundos.
 //   - Push de placas autorizadas a la cámara LPR local via su API nativa.
 //   - Heartbeat para que el cloud detecte caídas del agent.
 //   - Self-install como Windows Service / launchd / systemd.
@@ -58,7 +58,7 @@ func (p *program) run() {
 	defer cancel()
 
 	log.Printf("[main] arrancando sync agent v%s (cloud=%s, camera=%s @ %s, receiver=%v)",
-		AgentVersion, p.cfg.Cloud.BaseURL, p.cfg.Camera.Type, p.cfg.Camera.Host, p.cfg.Receiver.Enabled)
+		AgentVersion, p.cfg.Cloud.BaseURL, p.cfg.Camera.Type, p.cfg.Camera.Host, p.cfg.ReceiverEnabled())
 
 	// 1) Construir cliente cloud (compartido entre syncer y replay).
 	cloud := NewCloudClient(p.cfg.Cloud.BaseURL, p.cfg.Cloud.Token)
@@ -84,12 +84,10 @@ func (p *program) run() {
 	}
 	pingCancel()
 
-	// 4) Si Receiver.Enabled, arrancar HTTP receiver + replay worker en
-	// goroutines separadas. La captura visual es opt-in vía config — los
-	// agents v0.1.x existentes (sin sección `receiver:` en yaml) siguen
-	// corriendo solo como puller (whitelist + heartbeat) sin cambios.
+	// 4) Receiver + replay worker en goroutines separadas. Encendido de
+	// fábrica: se apaga a propósito con `receiver: { enabled: false }`.
 	var colaLocal ColaConEstadisticas
-	if p.cfg.Receiver.Enabled {
+	if p.cfg.ReceiverEnabled() {
 		queue, err := NewFileQueue(p.cfg.Receiver.QueueDir, p.cfg.Receiver.MaxQueueItems, p.cfg.Receiver.MaxQueueBytes)
 		if err != nil {
 			log.Fatalf("[main] error inicializando queue local: %v", err)
@@ -110,7 +108,7 @@ func (p *program) run() {
 		log.Printf("[main] receiver+replay activos. Queue actual: items=%d bytes=%d oldest=%s",
 			items, bytes, oldest.Round(time.Second))
 	} else {
-		log.Println("[main] receiver deshabilitado (modo legacy v0.1.x — solo whitelist sync)")
+		log.Println("[main] receiver apagado por config (solo whitelist sync)")
 	}
 
 	// 5) Arrancar el loop de sync (whitelist + heartbeat + auto-config).
@@ -143,6 +141,14 @@ func main() {
 	cfg, absConfigPath, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("error cargando config: %v", err)
+	}
+
+	// El log al archivo (con rotación) además de stderr. Sin esto `log.file`
+	// era un campo de config que no hacía nada.
+	if cerrar, err := configurarLog(cfg, absConfigPath); err != nil {
+		log.Printf("⚠ %v (se sigue solo con stderr)", err)
+	} else if cerrar != nil {
+		defer cerrar.Close()
 	}
 
 	// El servicio del sistema corre con el binario en una ruta absoluta.

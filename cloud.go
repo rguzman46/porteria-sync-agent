@@ -10,9 +10,19 @@ import (
 	"net/http"
 	"net/textproto"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+)
+
+// Rutas de la API de acceso. Van versionadas: `/api/access/...` sin versión
+// dejó de existir y respondía 404, que el agente trataba como rechazo
+// permanente y descartaba la foto.
+const (
+	rutaWhitelist      = "/api/v1/access/whitelist"
+	rutaHeartbeat      = "/api/v1/access/heartbeat"
+	rutaEventMultipart = "/api/v1/access/event/multipart"
 )
 
 // Plate representa una entrada del whitelist devuelto por el cloud.
@@ -24,11 +34,11 @@ type Plate struct {
 	ValidUntil string `json:"valid_until"`
 }
 
-// DeviceMetadata es la sub-estructura `device` que el cloud incluye en
-// /api/access/whitelist y /api/access/heartbeat desde V1.3 (plug-and-play).
-// Permite al agent auto-configurar su adapter sin que el admin tenga que
-// editar config.yaml — si el admin cambia el modelo en el panel, el cloud
-// reporta el nuevo vendor_family acá y el agent se reconfigura.
+// DeviceMetadata es la sub-estructura `device` que el cloud puede incluir en
+// la respuesta del whitelist o del latido para que el agent auto-configure
+// su adapter sin que el admin edite config.yaml. La plataforma actual no la
+// manda en el latido: el agente la acepta en cualquiera de las dos
+// respuestas y no depende de ninguna.
 type DeviceMetadata struct {
 	ID           int64  `json:"id"`
 	DeviceType   string `json:"device_type"`   // hikvision | dahua | axis | ...
@@ -36,12 +46,16 @@ type DeviceMetadata struct {
 	DeviceModel  string `json:"device_model"`  // "DS-TCG405-E" | "ITC215-PW6M-IRLZF" | "" | null
 }
 
-// Whitelist es la respuesta completa del endpoint /api/access/whitelist.
+// Whitelist es la respuesta completa del endpoint /api/v1/access/whitelist.
 type Whitelist struct {
-	Version     string          `json:"version"`
-	GeneratedAt string          `json:"generated_at"`
-	Plates      []Plate         `json:"plates"`
-	Device      *DeviceMetadata `json:"device,omitempty"` // V1.3+ — auto-config
+	Version     string  `json:"version"`
+	GeneratedAt string  `json:"generated_at"`
+	Plates      []Plate `json:"plates"`
+	// BlockedPlates son las que la cámara NO debe dejar pasar (solo
+	// severidad `block`). Van aparte para que un agente viejo las ignore en
+	// vez de tomarlas por permitidas.
+	BlockedPlates []Plate         `json:"blocked_plates"`
+	Device        *DeviceMetadata `json:"device,omitempty"`
 }
 
 // CloudClient encapsula las llamadas HTTPS al cloud de Porteria Plus.
@@ -73,8 +87,9 @@ type CloudClient struct {
 	pendingLastModified      string
 }
 
-// AgentVersion es la versión del binario, inyectada en build via -ldflags.
-var AgentVersion = "dev"
+// AgentVersion es la versión del binario. El release la inyecta desde el tag
+// (`-X main.AgentVersion=1.4.0`); este valor es el de un build local.
+var AgentVersion = "1.4.0"
 
 func NewCloudClient(baseURL, token string) *CloudClient {
 	return &CloudClient{
@@ -100,13 +115,12 @@ func NewCloudClient(baseURL, token string) *CloudClient {
 // Persiste internamente el header `Last-Modified` recibido para usarlo como
 // `If-Modified-Since` en la próxima llamada → smart polling escalable.
 func (c *CloudClient) FetchWhitelist(ctx context.Context) (*Whitelist, bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/access/whitelist", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+rutaWhitelist, nil)
 	if err != nil {
 		return nil, false, err
 	}
 	c.cabeceras(req)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
 	if c.acknowledgedLastModified != "" {
 		req.Header.Set("If-Modified-Since", c.acknowledgedLastModified)
 	}
@@ -140,7 +154,7 @@ func (c *CloudClient) FetchWhitelist(ctx context.Context) (*Whitelist, bool, err
 		return &wl, true, nil
 
 	case http.StatusUnauthorized:
-		return nil, false, fmt.Errorf("token inválido (401) — regenera el token en el panel /integrations")
+		return nil, false, fmt.Errorf("token inválido (401) — regenera la llave en el panel /integrations")
 
 	default:
 		// Cualquier otro código: leer un poco del body para mostrar al usuario.
@@ -149,12 +163,23 @@ func (c *CloudClient) FetchWhitelist(ctx context.Context) (*Whitelist, bool, err
 	}
 }
 
-// HeartbeatResult resume la respuesta del cloud al heartbeat.
+// HeartbeatResult resume la respuesta del cloud al heartbeat. `device` es
+// opcional: la plataforma actual no lo manda y el agente no lo necesita
+// (la reconfiguración sale del whitelist 200).
 type HeartbeatResult struct {
 	OK               bool            `json:"ok"`
 	ServerTime       string          `json:"server_time"`
 	WhitelistVersion string          `json:"whitelist_version"`
 	Device           *DeviceMetadata `json:"device,omitempty"`
+}
+
+// Capacidades es lo que el adaptador de la cámara sabe hacer de verdad. Se
+// reporta en el latido para que el panel no prometa lo que la cámara no
+// cumple: una lista negra que «se sincronizó» pero nunca llegó a la cámara
+// es peor que ninguna.
+type Capacidades struct {
+	Whitelist bool
+	Blocklist bool
 }
 
 // HeartbeatReport es lo que el agent cuenta de sí mismo en cada latido.
@@ -182,12 +207,13 @@ type HeartbeatReport struct {
 	// PlatesPushed son las placas que quedaron escritas en la cámara en el
 	// último push exitoso.
 	PlatesPushed int
+	// Capacidades del adaptador activo. Nil hasta que haya adaptador.
+	Capacidades *Capacidades
 }
 
 // Heartbeat reporta al cloud que el agent está vivo y **cómo le está yendo**.
-// Retorna la versión actual del whitelist + metadata del device (V1.3+)
-// para que el agent pueda auto-actualizar su adapter si el admin cambió
-// de modelo en el panel.
+// Retorna la versión actual del whitelist para que el agent sepa que hay
+// cambios sin esperar al siguiente sondeo de la lista completa.
 func (c *CloudClient) Heartbeat(ctx context.Context, report HeartbeatReport) (*HeartbeatResult, error) {
 	payload := map[string]any{
 		"agent_version": AgentVersion,
@@ -205,16 +231,19 @@ func (c *CloudClient) Heartbeat(ctx context.Context, report HeartbeatReport) (*H
 			payload["plates_pushed"] = report.PlatesPushed
 		}
 	}
+	if report.Capacidades != nil {
+		payload["whitelist_supported"] = report.Capacidades.Whitelist
+		payload["blocklist_supported"] = report.Capacidades.Blocklist
+	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/access/heartbeat", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+rutaHeartbeat, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	c.cabeceras(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -237,13 +266,11 @@ func (c *CloudClient) Heartbeat(ctx context.Context, report HeartbeatReport) (*H
 // PostEventMultipartResult resume el resultado del cloud al recibir el
 // evento + snapshot. Solo expone lo útil para logs del agent.
 type PostEventMultipartResult struct {
-	OK             bool   `json:"ok"`
-	EventID        int64  `json:"event_id"`
-	Action         string `json:"action"`
-	VisitaID       *int64 `json:"visita_id"`
-	Deduplicated   bool   `json:"deduplicated"`
-	SnapshotStored bool   `json:"snapshot_stored"`
-	SnapshotPath   string `json:"snapshot_path"`
+	EventID      int64  `json:"event_id"`
+	Plate        string `json:"plate"`
+	Status       string `json:"status"` // created | duplicate | blocked
+	VehicleMatch bool   `json:"vehicle_match"`
+	BlocklistHit string `json:"blocklist_hit"`
 }
 
 // PostEventResultStatus categoriza el outcome para decidir si reintentamos.
@@ -255,30 +282,29 @@ const (
 	// PostEventPermanent: el cloud rechazó con 4xx (auth, payload inválido,
 	// capture deshabilitada por toggle). Reintentar no va a ayudar — descartar.
 	PostEventPermanent
-	// PostEventTransient: error de red, 5xx, timeout. Reintentar con back-off.
+	// PostEventTransient: error de red, 5xx, timeout. Reintentar con back-off,
+	// sin límite de intentos.
 	PostEventTransient
 )
 
-// PostEventMultipart envía un evento queued + su snapshot al cloud via
-// POST /api/access/event/multipart. Construye el multipart in-memory y lo
-// envía con Bearer auth + User-Agent.
+// PostEventMultipart envía un evento queued + su foto (y el recorte, si lo
+// hay) al cloud via POST /api/v1/access/event/multipart.
 //
 // Retorna el status categorizado para que el replay worker decida si
 // borrar de la queue (success/permanent) o reintentar (transient).
-func (c *CloudClient) PostEventMultipart(ctx context.Context, ev *QueuedEvent, snapshot []byte) (PostEventResultStatus, *PostEventMultipartResult, error) {
-	body, contentType, err := buildEventMultipartBody(ev, snapshot)
+func (c *CloudClient) PostEventMultipart(ctx context.Context, ev *QueuedEvent, snapshot, recorte []byte) (PostEventResultStatus, *PostEventMultipartResult, error) {
+	body, contentType, err := buildEventMultipartBody(ev, snapshot, recorte)
 	if err != nil {
 		return PostEventPermanent, nil, fmt.Errorf("construyendo multipart: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/access/event/multipart", body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+rutaEventMultipart, body)
 	if err != nil {
 		return PostEventPermanent, nil, err
 	}
 	c.cabeceras(req)
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -299,29 +325,53 @@ func (c *CloudClient) PostEventMultipart(ctx context.Context, ev *QueuedEvent, s
 		return PostEventSuccess, &result, nil
 	}
 
-	// 4xx → permanente (auth, payload, capture_snapshot=false)
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+	// 4xx → permanente (auth, payload, capture_snapshot=false). El 429 es la
+	// excepción: es «ahora no», no «nunca».
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 		return PostEventPermanent, nil, fmt.Errorf("status %d: %s", resp.StatusCode, snippet(respBody, 256))
 	}
 
-	// 5xx / otros → transient
+	// 5xx / 429 / otros → transient
 	return PostEventTransient, nil, fmt.Errorf("status %d: %s", resp.StatusCode, snippet(respBody, 256))
 }
 
-// buildEventMultipartBody construye un body multipart in-memory con dos
-// partes: event_data (JSON) + snapshot (binary). El endpoint cloud lo
-// espera con esos nombres exactos (ver StoreAccessEventMultipartRequest).
-func buildEventMultipartBody(ev *QueuedEvent, snapshot []byte) (io.Reader, string, error) {
+// buildEventMultipartBody construye el multipart que espera
+// `POST /api/v1/access/event/multipart`:
+//
+//   - `event_data`: JSON con `plate`, `client_event_id`, y solo si existen
+//     `direction`, `timestamp`, `confidence`, `plate_box`, `metadata`.
+//   - `snapshot`: la escena.
+//   - `plate_crop`: el recorte de la placa, solo si la cámara lo mandó.
+//
+// `timestamp` se omite cuando está vacío: mandarlo como `""` era un 422, y un
+// 4xx es permanente para el agente, así que la foto se descartaba.
+func buildEventMultipartBody(ev *QueuedEvent, snapshot, recorte []byte) (io.Reader, string, error) {
 	buf := &bytes.Buffer{}
 	mw := multipart.NewWriter(buf)
 
-	// 1) event_data como JSON.
-	eventJSON, err := json.Marshal(map[string]any{
-		"plate":     ev.Plate,
-		"direction": ev.Direction,
-		"timestamp": ev.Timestamp,
-		"metadata":  ev.Metadata,
-	})
+	datos := map[string]any{
+		"plate":           ev.Plate,
+		"client_event_id": ev.ClientEventID,
+	}
+	if datos["client_event_id"] == "" {
+		datos["client_event_id"] = ev.ID
+	}
+	if ev.Direction != "" {
+		datos["direction"] = ev.Direction
+	}
+	if ev.Timestamp != "" {
+		datos["timestamp"] = ev.Timestamp
+	}
+	if conf := confianzaDelEvento(ev); conf != nil {
+		datos["confidence"] = *conf
+	}
+	if ev.PlateBox != nil {
+		datos["plate_box"] = ev.PlateBox
+	}
+	if len(ev.Metadata) > 0 {
+		datos["metadata"] = ev.Metadata
+	}
+	eventJSON, err := json.Marshal(datos)
 	if err != nil {
 		return nil, "", err
 	}
@@ -337,21 +387,17 @@ func buildEventMultipartBody(ev *QueuedEvent, snapshot []byte) (io.Reader, strin
 		return nil, "", err
 	}
 
-	// 2) snapshot como image/* — usamos el mime original del evento (JPEG
-	// típicamente de Hikvision). El cloud convierte a WebP server-side.
 	mimeType := ev.SnapshotMimeType
 	if mimeType == "" {
 		mimeType = "image/jpeg"
 	}
-	snapshotHeader := textproto.MIMEHeader{}
-	snapshotHeader.Set("Content-Disposition", `form-data; name="snapshot"; filename="snapshot.jpg"`)
-	snapshotHeader.Set("Content-Type", mimeType)
-	snapshotPart, err := mw.CreatePart(snapshotHeader)
-	if err != nil {
+	if err := escribirImagen(mw, "snapshot", "snapshot.jpg", mimeType, snapshot); err != nil {
 		return nil, "", err
 	}
-	if _, err := snapshotPart.Write(snapshot); err != nil {
-		return nil, "", err
+	if len(recorte) > 0 {
+		if err := escribirImagen(mw, "plate_crop", "plate_crop.jpg", "image/jpeg", recorte); err != nil {
+			return nil, "", err
+		}
 	}
 
 	if err := mw.Close(); err != nil {
@@ -359,6 +405,48 @@ func buildEventMultipartBody(ev *QueuedEvent, snapshot []byte) (io.Reader, strin
 	}
 
 	return buf, mw.FormDataContentType(), nil
+}
+
+func escribirImagen(mw *multipart.Writer, nombre, archivo, mimeType string, datos []byte) error {
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, nombre, archivo))
+	h.Set("Content-Type", mimeType)
+	parte, err := mw.CreatePart(h)
+	if err != nil {
+		return err
+	}
+	_, err = parte.Write(datos)
+	return err
+}
+
+// confianzaDelEvento toma la confianza del campo propio o, si el adaptador
+// solo la dejó en metadata (`confidence_level` de Hikvision, `confidence`
+// del genérico), la saca de ahí. El cloud normaliza 0–100 a 0–1.
+func confianzaDelEvento(ev *QueuedEvent) *float64 {
+	if ev.Confidence != nil {
+		return ev.Confidence
+	}
+	for _, clave := range []string{"confidence", "confidence_level"} {
+		if v, ok := ev.Metadata[clave]; ok {
+			if f, ok := aFloat(v); ok {
+				return &f
+			}
+		}
+	}
+	return nil
+}
+
+func aFloat(v any) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case int:
+		return float64(x), true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return f, err == nil
+	}
+	return 0, false
 }
 
 func snippet(b []byte, max int) string {
@@ -397,9 +485,10 @@ func truncar(texto string, n int) string {
 }
 
 // cabeceras pone lo que va en toda petición al cloud: quién es el conjunto
-// (la llave) y cuál de sus cámaras (el token del dispositivo).
+// (la llave), cuál de sus cámaras (el token del dispositivo) y qué agente.
 func (c *CloudClient) cabeceras(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", c.userAgent)
 	if c.deviceToken != "" {
 		req.Header.Set("X-Device-Token", c.deviceToken)
 	}

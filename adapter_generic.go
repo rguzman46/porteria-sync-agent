@@ -11,33 +11,38 @@ import (
 )
 
 // parseGenericMultipart parsea un multipart genérico con shape simple:
-//   - parte "event_data" (application/json) con `{plate, direction, timestamp, metadata}`
+//   - parte "event_data" (application/json) con
+//     `{plate, direction, timestamp, confidence, plate_box, client_event_id, metadata}`
 //   - parte "snapshot" (image/jpeg | image/png | image/webp)
+//   - parte "plate_crop" opcional (el recorte de la placa)
 //
-// Pensado para tests manuales (curl), integradores propios, o adapters
-// futuros (Dahua/Axis pueden adaptarse a este shape vía script intermedio).
+// Pensado para tests manuales (curl), integradores propios, o cámaras que
+// se puedan configurar para emitir este shape.
 //
 // Ejemplo con curl:
 //
 //	curl -X POST http://localhost:8787/lpr-event \
 //	  -H "X-Agent-Source: generic" \
-//	  -F 'event_data={"plate":"ABC123","direction":"entry"}' \
+//	  -F 'event_data={"plate":"ABC123","direction":"entry","confidence":0.97}' \
 //	  -F 'snapshot=@carro.jpg;type=image/jpeg'
 type GenericEventData struct {
-	Plate     string         `json:"plate"`
-	Direction string         `json:"direction"`
-	Timestamp string         `json:"timestamp"`
-	Metadata  map[string]any `json:"metadata"`
+	Plate         string         `json:"plate"`
+	Direction     string         `json:"direction"`
+	Timestamp     string         `json:"timestamp"`
+	ClientEventID string         `json:"client_event_id"`
+	Confidence    *float64       `json:"confidence"`
+	PlateBox      *PlateBox      `json:"plate_box"`
+	Metadata      map[string]any `json:"metadata"`
 }
 
-func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
+func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, []byte, error) {
 	ct := req.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Content-Type inválido: %w", err)
+		return nil, nil, nil, fmt.Errorf("Content-Type inválido: %w", err)
 	}
 	if !strings.HasPrefix(mediaType, "multipart/") {
-		return nil, nil, fmt.Errorf("Content-Type debe ser multipart/* (recibí %s)", mediaType)
+		return nil, nil, nil, fmt.Errorf("Content-Type debe ser multipart/* (recibí %s)", mediaType)
 	}
 
 	mr := multipart.NewReader(req.Body, params["boundary"])
@@ -45,6 +50,7 @@ func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
 	var (
 		data       *GenericEventData
 		snapshot   []byte
+		recorte    []byte
 		snapshotCT string
 	)
 
@@ -54,7 +60,7 @@ func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
 			break
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("leyendo siguiente parte: %w", err)
+			return nil, nil, nil, fmt.Errorf("leyendo siguiente parte: %w", err)
 		}
 
 		switch part.FormName() {
@@ -62,11 +68,11 @@ func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
 			raw, err := readAllLimited(part, 1*1024*1024)
 			_ = part.Close()
 			if err != nil {
-				return nil, nil, fmt.Errorf("leyendo event_data: %w", err)
+				return nil, nil, nil, fmt.Errorf("leyendo event_data: %w", err)
 			}
 			d := &GenericEventData{}
 			if err := json.Unmarshal(raw, d); err != nil {
-				return nil, nil, fmt.Errorf("parseando event_data JSON: %w", err)
+				return nil, nil, nil, fmt.Errorf("parseando event_data JSON: %w", err)
 			}
 			data = d
 
@@ -75,9 +81,17 @@ func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
 			snapshotCT = part.Header.Get("Content-Type")
 			_ = part.Close()
 			if err != nil {
-				return nil, nil, fmt.Errorf("leyendo snapshot: %w", err)
+				return nil, nil, nil, fmt.Errorf("leyendo snapshot: %w", err)
 			}
 			snapshot = raw
+
+		case "plate_crop":
+			raw, err := readAllLimited(part, MaxSnapshotSize)
+			_ = part.Close()
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("leyendo plate_crop: %w", err)
+			}
+			recorte = raw
 
 		default:
 			_, _ = io.Copy(io.Discard, part)
@@ -86,10 +100,10 @@ func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
 	}
 
 	if data == nil {
-		return nil, nil, fmt.Errorf("falta parte 'event_data' (JSON)")
+		return nil, nil, nil, fmt.Errorf("falta parte 'event_data' (JSON)")
 	}
 	if snapshot == nil {
-		return nil, nil, fmt.Errorf("falta parte 'snapshot' (image)")
+		return nil, nil, nil, fmt.Errorf("falta parte 'snapshot' (image)")
 	}
 
 	if snapshotCT == "" {
@@ -97,9 +111,12 @@ func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
 	}
 
 	ev := &QueuedEvent{
+		ClientEventID:    strings.TrimSpace(data.ClientEventID),
 		Plate:            normalizeAdapterPlate(data.Plate),
 		Direction:        strings.ToLower(strings.TrimSpace(data.Direction)),
-		Timestamp:        data.Timestamp,
+		Timestamp:        strings.TrimSpace(data.Timestamp),
+		Confidence:       data.Confidence,
+		PlateBox:         data.PlateBox,
 		Metadata:         data.Metadata,
 		SnapshotMimeType: snapshotCT,
 	}
@@ -108,5 +125,5 @@ func parseGenericMultipart(req *http.Request) (*QueuedEvent, []byte, error) {
 	}
 	ev.Metadata["source"] = "generic"
 
-	return ev, snapshot, nil
+	return ev, snapshot, recorte, nil
 }

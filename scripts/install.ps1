@@ -23,6 +23,10 @@
     interactivamente (no se pasan por URL para evitar fugas en historiales
     de shell).
 
+    El binario se descarga de la MISMA release que este guion (nunca de
+    `latest`): la portería queda con la versión que se probó contra esta
+    plataforma, no con la que alguien publique mañana.
+
 .NOTES
     Versión: __VERSION__
     SHA-256 esperado del binario Windows: __EXPECTED_HASH__
@@ -58,7 +62,11 @@ param(
     [string]$CameraUser = 'admin',
     [string]$CameraPassword,
     [string]$InstallDir = 'C:\PorteriaAgent',
-    [string]$BinaryUrl = 'https://github.com/rguzman46/porteria-sync-agent/releases/latest/download/porteria-agent.exe',
+    # Puerto en el que el agent recibe las lecturas de la cámara. Se abre en
+    # el firewall de Windows solo para la IP de la cámara.
+    [int]$ReceiverPort = 8787,
+    # De la misma release que este guion. `__VERSION__` lo sustituye CI.
+    [string]$BinaryUrl = 'https://github.com/rguzman46/porteria-sync-agent/releases/download/agent-v__VERSION__/porteria-agent.exe',
     [string]$ExpectedHash = '__EXPECTED_HASH__'
 )
 
@@ -95,10 +103,27 @@ if (-not $DeviceToken -and $PSCmdlet.SessionState.PSVariable.Get('DeviceToken'))
 if (-not $CloudUrl -and $PSCmdlet.SessionState.PSVariable.Get('CloudUrl')) {
     $CloudUrl = $PSCmdlet.SessionState.PSVariable.Get('CloudUrl').Value
 }
-# VendorFamily se puede pasar como $VendorFamily en el scope llamante para que
-# el comando del panel `/integrations` lo pre-pueble sin que el admin lo escriba.
+# CameraType y VendorFamily se pueden pasar como $CameraType / $VendorFamily en
+# el scope llamante para que el bloque del panel los pre-pueble sin que el
+# admin escriba nada. CameraType tiene default, así que se mira si el
+# parámetro vino de verdad antes de tomar el del scope.
+if (-not $PSBoundParameters.ContainsKey('CameraType') -and $PSCmdlet.SessionState.PSVariable.Get('CameraType')) {
+    $delScope = $PSCmdlet.SessionState.PSVariable.Get('CameraType').Value
+    if ($delScope) { $CameraType = $delScope }
+}
 if (-not $VendorFamily -and $PSCmdlet.SessionState.PSVariable.Get('VendorFamily')) {
     $VendorFamily = $PSCmdlet.SessionState.PSVariable.Get('VendorFamily').Value
+}
+$CameraType = $CameraType.ToLower().Trim()
+
+# Un guion que no salió de una release no sabe de qué release bajar el
+# binario. Se corta acá, no se cae a `latest`.
+if ($BinaryUrl -like '*__VERSION__*') {
+    Write-Host ""
+    Write-Host "✗ Este install.ps1 no viene de una release (falta la versión)." -ForegroundColor Red
+    Write-Host "  Usa el bloque que arma el panel del conjunto, o pasa -BinaryUrl con la release exacta."
+    Write-Host ""
+    exit 1
 }
 
 while (-not $Token) {
@@ -263,6 +288,19 @@ poll:
 log:
   file: agent.log
   level: info
+  max_size_mb: 10
+  keep: 3
+
+# Recepción de las lecturas (foto + placa) desde la cámara. La cámara se
+# configura para postear a http://<IP de este PC>:$ReceiverPort/lpr-event
+# (Hikvision), /NotificationInfo/TollgateInfo (Dahua) o /axis-event (Axis).
+# Solo se aceptan POST desde camera.host; agrega IPs en allow_from si hace
+# falta. allow_any: true apaga el filtro (solo para diagnosticar).
+receiver:
+  enabled: true
+  bind_address: 0.0.0.0:$ReceiverPort
+  allow_from: []
+  allow_any: false
 "@
 Set-Content -Path $configPath -Value $configContent -Encoding UTF8
 
@@ -286,7 +324,32 @@ try {
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-# 6. Instalar como Windows Service y arrancarlo
+# 6. Abrir el puerto del receiver en el firewall de Windows
+# ─────────────────────────────────────────────────────────────────────────
+# Sin esto la cámara postea y Windows lo bota en silencio: el agent se ve
+# vivo, la lista se sincroniza y nunca llega una foto. Idempotente: si la
+# regla ya existe se actualiza (por si cambió la IP de la cámara o el puerto).
+# Solo para la IP de la cámara — el agent además filtra por origen.
+
+Write-Host "▸ Abriendo el puerto $ReceiverPort en el firewall para $CameraHost ..."
+$ruleName = 'Porteria Sync Agent - receptor LPR'
+try {
+    $regla = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    if ($regla) {
+        Set-NetFirewallRule -DisplayName $ruleName -LocalPort $ReceiverPort -RemoteAddress $CameraHost -Enabled True | Out-Null
+        Write-Host "  ✓ Regla existente actualizada"
+    } else {
+        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP `
+            -LocalPort $ReceiverPort -RemoteAddress $CameraHost -Action Allow -Profile Any | Out-Null
+        Write-Host "  ✓ Regla creada (TCP $ReceiverPort entrante desde $CameraHost)"
+    }
+} catch {
+    Write-Host "  ⚠ No se pudo crear la regla de firewall: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "    Ábrela a mano: TCP $ReceiverPort entrante desde $CameraHost, o la cámara no podrá mandar fotos."
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# 7. Instalar como Windows Service y arrancarlo
 # ─────────────────────────────────────────────────────────────────────────
 
 Write-Host "▸ Registrando como Windows Service..."
@@ -314,7 +377,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-# 7. Verificación final
+# 8. Verificación final
 # ─────────────────────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -336,6 +399,14 @@ Write-Host "    1. Verifica logs:    Get-Content $InstallDir\agent.log -Tail 20"
 Write-Host "    2. Estado servicio:  Get-Service PorteriaSyncAgent"
 Write-Host "    3. Panel cloud:      $CloudUrl/integrations"
 Write-Host "       (debes ver 'última sync' actualizado en pocos segundos)"
+Write-Host "    4. En la cámara, apunta el envío de eventos a:"
+$ipLocal = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
+if (-not $ipLocal) { $ipLocal = '<IP de este PC>' }
+switch -Wildcard ($CameraType) {
+    'dahua*' { Write-Host "       http://${ipLocal}:$ReceiverPort/NotificationInfo/TollgateInfo  (ITSAPI: responde {""Result"": true})" }
+    'axis*'  { Write-Host "       http://${ipLocal}:$ReceiverPort/axis-event  (License Plate Verifier, HTTP POST JSON)" }
+    default  { Write-Host "       http://${ipLocal}:$ReceiverPort/lpr-event  (HTTP Listening, multipart)" }
+}
 Write-Host ""
 Write-Host "  Para desinstalar:      iex (irm '$CloudUrl/integrations/uninstall-script.ps1')"
 Write-Host ""
