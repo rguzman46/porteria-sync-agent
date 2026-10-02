@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,8 +43,12 @@ import (
 // idempotente por placa (la cámara acepta re-agregar) y usa solo llamadas
 // documentadas. La conciliación completa contra lo que la cámara tiene de
 // verdad necesita `export<lista>`, cuyo formato de salida hay que confirmar
-// con la cámara al lado; hasta entonces, el primer push tras un reinicio del
-// agente no borra lo que otro haya metido a mano.
+// con la cámara al lado; hasta entonces no se borra lo que otro haya metido a
+// mano.
+//
+// Lo empujado se guarda en disco (`estado`): sin eso, tras un reinicio del
+// agente el adaptador olvidaba qué había puesto, y una placa retirada en la
+// plataforma —un residente que se fue, el LPR apagado— seguía abriendo.
 //
 // Auth: Digest por default. Mismo helper digestClient que Hikvision.
 type AxisVapixAdapter struct {
@@ -52,6 +60,7 @@ type AxisVapixAdapter struct {
 
 	mu       sync.Mutex
 	anterior map[string]map[string]bool // lista → placas del último push exitoso
+	estado   string                     // archivo donde se guarda `anterior`; vacío = solo en memoria
 }
 
 func NewAxisVapixAdapter(host string, port int, user, password string) *AxisVapixAdapter {
@@ -64,6 +73,62 @@ func NewAxisVapixAdapter(host string, port int, user, password string) *AxisVapi
 		digest:   newDigestClient(user, password, httpClient),
 		anterior: map[string]map[string]bool{},
 	}
+}
+
+// conEstado carga lo empujado antes de un reinicio y lo guarda en adelante.
+func (a *AxisVapixAdapter) conEstado(ruta string) *AxisVapixAdapter {
+	a.estado = ruta
+	datos, err := os.ReadFile(ruta)
+	if err != nil {
+		return a
+	}
+	var guardado map[string][]string
+	if json.Unmarshal(datos, &guardado) != nil {
+		return a
+	}
+	for lista, placas := range guardado {
+		a.anterior[lista] = make(map[string]bool, len(placas))
+		for _, p := range placas {
+			a.anterior[lista][p] = true
+		}
+	}
+	return a
+}
+
+// guardarEstado escribe lo empujado con escritura atómica: un corte de luz a
+// mitad no deja un archivo a medias.
+func (a *AxisVapixAdapter) guardarEstado() error {
+	if a.estado == "" {
+		return nil
+	}
+	guardado := map[string][]string{}
+	for lista, placas := range a.anterior {
+		for p := range placas {
+			guardado[lista] = append(guardado[lista], p)
+		}
+		sort.Strings(guardado[lista])
+	}
+	datos, err := json.Marshal(guardado)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(a.estado), 0o700); err != nil {
+		return err
+	}
+	tmp := a.estado + ".tmp"
+	if err := os.WriteFile(tmp, datos, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.estado)
+}
+
+// rutaDeEstadoAxis: junto al binario, como la cola, una por cámara.
+func rutaDeEstadoAxis(host string, port int) string {
+	dir := "estado"
+	if exe, err := os.Executable(); err == nil {
+		dir = filepath.Join(filepath.Dir(exe), "estado")
+	}
+	return filepath.Join(dir, fmt.Sprintf("axis_%s_%d.json", strings.ReplaceAll(host, ":", "_"), port))
 }
 
 func (a *AxisVapixAdapter) Name() string { return "axis_vapix" }
@@ -132,7 +197,12 @@ func (a *AxisVapixAdapter) sincronizarLista(ctx context.Context, lista string, d
 	}
 	a.mu.Lock()
 	a.anterior[lista] = actuales
+	err := a.guardarEstado()
 	a.mu.Unlock()
+	if err != nil {
+		// La cámara ya quedó bien; lo que falla es recordarlo tras un reinicio.
+		return fmt.Errorf("lista de %s sincronizada, pero no se pudo guardar el estado en %s: %w", lista, a.estado, err)
+	}
 	return nil
 }
 

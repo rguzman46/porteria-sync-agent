@@ -103,7 +103,7 @@ func NewCameraAdapter(cfg *Config) (CameraAdapter, error) {
 		return NewDahuaITCAdapter(c.Host, c.Port, c.User, c.Password), nil
 	// ── Axis ─────────────────────────────────────────────────────
 	case "axis_vapix":
-		return NewAxisVapixAdapter(c.Host, c.Port, c.User, c.Password), nil
+		return NewAxisVapixAdapter(c.Host, c.Port, c.User, c.Password).conEstado(rutaDeEstadoAxis(c.Host, c.Port)), nil
 	default:
 		return nil, fmt.Errorf("familia de cámara no soportada: %q (tipo=%q). Familias válidas: %s", family, cfg.Camera.Type, listaDeFamilias())
 	}

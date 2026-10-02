@@ -90,6 +90,33 @@ func TestAxisUsaElAPIDelACAPYRetiraLoQueYaNoEsta(t *testing.T) {
 	mustContain(t, strings.Join(llamadas, "\n"), "api=delplate&list=allowlist&plate=AAA111")
 }
 
+func TestAxisRecuerdaLoQueEmpujoTrasUnReinicio(t *testing.T) {
+	var llamadas []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llamadas = append(llamadas, r.URL.RawQuery)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer srv.Close()
+	host, port := splitHostPort(t, srv.URL)
+	estado := filepath.Join(t.TempDir(), "estado", "axis.json")
+
+	antes := NewAxisVapixAdapter(host, port, "admin", "x").conEstado(estado)
+	if err := antes.SyncWhitelist(testContext(), []Plate{{Plate: "AAA111"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(estado); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("estado no guardado con 0600: %v", err)
+	}
+
+	// El agente se reinicia y la placa ya no está en la plataforma.
+	llamadas = nil
+	despues := NewAxisVapixAdapter(host, port, "admin", "x").conEstado(estado)
+	if err := despues.SyncWhitelist(testContext(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, strings.Join(llamadas, "\n"), "api=delplate&list=allowlist&plate=AAA111")
+}
+
 func TestLaColaGuardaConPermisosRestringidos(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "queue")
 	q, err := NewFileQueue(dir, 10, 1024*1024)
