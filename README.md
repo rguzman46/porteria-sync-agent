@@ -94,7 +94,7 @@ Por eso el instalador lo pide si no viene y no deja seguir sin él. Las llaves
 
 ```powershell
 mkdir C:\PorteriaAgent; cd C:\PorteriaAgent
-# Descarga porteria-agent.exe de la release agent-v1.4.0 (no de latest)
+# Descarga porteria-agent.exe de la release agent-v1.5.0 (no de latest)
 Copy-Item config.example.yaml config.yaml
 notepad config.yaml            # token, device_token, IP y credenciales de la cámara
 New-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR' -Direction Inbound -Protocol TCP -LocalPort 8787 -RemoteAddress <IP de la cámara> -Action Allow
@@ -282,7 +282,11 @@ ignora los `update`, y junta las imágenes del mismo `carID` del lote. Las
 credenciales desde el receptor.
 
 Listas: `addplate`/`delplate` por placa sobre `allowlist` y `blocklist`. El
-agente retira lo que estaba en el push anterior y ya no está; la conciliación
+agente retira lo que estaba en el push anterior y ya no está. Desde v1.5.0 ese
+push anterior se guarda en `estado/axis_<host>_<puerto>.json`, junto al
+binario (escritura atómica, permisos 0600): un reinicio del agente ya no
+olvida qué placas retirar, y un residente dado de baja deja de abrir aunque
+el agente se haya reiniciado entre medio. La conciliación
 contra lo que la cámara tiene de verdad necesita `export<lista>`, cuyo formato
 hay que confirmar con la cámara. La vigencia no se manda (formato sin
 confirmar): el cloud ya excluye lo vencido y la placa sale en el siguiente
@@ -358,7 +362,7 @@ nuevo sin reiniciar el servicio.
 Get-Content C:\PorteriaAgent\agent.log -Tail 50
 Get-Content C:\PorteriaAgent\agent.log -Wait
 curl http://localhost:8787/health
-# → {"ok":true,"agent_version":"1.4.0","queue_items":0,"queue_bytes":0,...}
+# → {"ok":true,"agent_version":"1.5.0","queue_items":0,"queue_bytes":0,...}
 ```
 
 ### Probar el receptor a mano
@@ -386,7 +390,8 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 | Versión | Lo que añade |
 |---|---|
-| **v1.4.0** | Contrato v1 de la API (`/api/v1/access/...`, llave `ppk_`, `client_event_id`, `confidence`, `plate_box`, `plate_crop`, sin `timestamp` vacío). Lista negra en Hikvision y Axis; `whitelist_supported`/`blocklist_supported` en el latido. Receptores nativos Dahua ITSAPI y Axis LPV; Hikvision identifica escena y recorte por nombre y recibe 200 vacío. Filtro por IP de origen (403), receiver encendido de fábrica, firewall desde el instalador, binario de la misma release. Reintentos sin descarte por red/5xx, back-off tope 5 min. Fotos > 4 MB recomprimidas. Cola 0600/0700. `log.file` con rotación. Build linux-arm64. |
+| **v1.5.0** | Axis recuerda lo que empujó tras un reinicio (`estado/axis_<host>_<puerto>.json`): sin esto, una placa dada de baja seguía abriendo en una Axis si el agente se había reiniciado. |
+| v1.4.0 | Contrato v1 de la API (`/api/v1/access/...`, llave `ppk_`, `client_event_id`, `confidence`, `plate_box`, `plate_crop`, sin `timestamp` vacío). Lista negra en Hikvision y Axis; `whitelist_supported`/`blocklist_supported` en el latido. Receptores nativos Dahua ITSAPI y Axis LPV; Hikvision identifica escena y recorte por nombre y recibe 200 vacío. Filtro por IP de origen (403), receiver encendido de fábrica, firewall desde el instalador, binario de la misma release. Reintentos sin descarte por red/5xx, back-off tope 5 min. Fotos > 4 MB recomprimidas. Cola 0600/0700. `log.file` con rotación. Build linux-arm64. |
 | v1.3.0 | Plug-and-play multi-vendor, `digestClient` compartido y auto-configuración del adapter. |
 | v0.2.0 | Receiver `:8787` + cola en disco + replay worker. |
 | v0.1.0 | Whitelist sync + heartbeat. Adapter Hikvision. Self-install como Windows Service. |
