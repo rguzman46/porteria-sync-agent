@@ -178,6 +178,26 @@ func (s *Syncer) cycle(ctx context.Context) {
 	// 3) Push a la cámara.
 	camera := s.currentCamera()
 	caps := camera.Capacidades()
+
+	// 3.a) Un lector de credenciales (QR del pase, tarjetas) recibe sus pases.
+	// Va antes de las placas y por su cuenta: un terminal de puerta peatonal
+	// no tiene placas que escribir.
+	if lector, ok := camera.(LectorDeCredenciales); ok && caps.Credenciales {
+		if err := lector.SyncCredentials(cycleCtx, wl.Credentials); err != nil {
+			s.anotarPush(err, 0)
+			log.Printf("[sync] carga de pases al lector falló: %v", err)
+			// Sin AckPending, igual que con las placas: el próximo ciclo
+			// vuelve a bajar la lista y reintenta.
+			return
+		}
+		log.Printf("[sync] lector actualizado: %d pases (versión %s, adapter=%s)", len(wl.Credentials), wl.Version, camera.Name())
+		if !caps.Whitelist {
+			s.anotarPush(nil, len(wl.Credentials))
+			s.cloud.AckPending()
+			return
+		}
+	}
+
 	if !caps.Whitelist {
 		// No hay nada que empujar y no es un fallo: el panel lo ve en el
 		// latido (`whitelist_supported=false`). Se confirma la versión para

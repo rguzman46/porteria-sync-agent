@@ -114,8 +114,11 @@ var familiasValidas = map[string]bool{
 	"hikvision_traffic":    true,
 	"hikvision_itc":        true,
 	"hikvision_anpr_audit": true,
-	"dahua_itc":            true,
-	"axis_vapix":           true,
+	// Terminales faciales con QR (lectores de credenciales, ADR-130).
+	"hikvision_dsk1t_qr_camara": true,
+	"hikvision_dsk1t_qr_modulo": true,
+	"dahua_itc":                 true,
+	"axis_vapix":                true,
 }
 
 // loadConfig lee `configPath` (yaml), aplica overrides de env y devuelve

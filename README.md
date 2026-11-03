@@ -210,8 +210,34 @@ para reconfigurar el adaptador en caliente.
 | `hikvision_anpr_audit` | `PUT /ISAPI/Traffic/channels/1/licensePlateAuditData?fileType=xml` (`listType` whiteList/blackList) | ✅ | ✅ | ídem | ⚠ Por confirmar |
 | `dahua_itc` | **no confirmada** (ver abajo) | ❌ | ❌ | ITSAPI JSON → `/NotificationInfo/TollgateInfo` | ⏳ Solo recepción |
 | `axis_vapix` | `/local/fflprapp/api.cgi` (`addplate`/`delplate`, listas `allowlist`/`blocklist`) | ✅ | ✅ | License Plate Verifier JSON → `/axis-event` | ⏳ Beta |
+| `hikvision_dsk1t_qr_camara`, `hikvision_dsk1t_qr_modulo` | Pases, no placas: ISAPI `UserInfo` + `CardInfo` (un titular por pase, el código como tarjeta) | ✅ pases | — | `AccessControllerEvent` → `/acs-event` | ⏳ Beta, sin piloto |
 
 Auth: HTTP Digest en todos.
+
+### Terminales faciales Hikvision con QR (`hikvision_dsk1t_*`)
+
+El visitante muestra en el terminal el QR de su pase y el terminal abre solo
+(ADR-130 de la plataforma). El agente:
+
+- **Carga los pases** que manda la nube en `credentials`: una persona por pase
+  (`employeeNo` = `ppv<id>`), con su vigencia en **hora de Bogotá** y el código
+  del pase como tarjeta. Sin nombre ni documento: en la pantalla sale
+  «Visitante» y los últimos cuatro dígitos.
+- **Solo toca lo suyo**: las personas con el prefijo `pp`. Los residentes que
+  el conjunto cargó con su rostro no se modifican ni se borran nunca.
+- **Recibe los eventos** en `/acs-event` y los sube a
+  `/api/v1/access/credential-event/multipart`. Solo sube lo que es de un pase:
+  el rostro o el llavero de un residente no sale del conjunto.
+
+Lo que hace el instalador en el terminal (el resto lo hace el agente):
+activarlo con contraseña de administrador, IP fija, encender la lectura de QR
+(viene apagada) y «Subir la foto capturada al autenticar», y en *HTTP
+Listening* poner `http://<IP del PC de la portería>:8787/acs-event`.
+
+⚠️ Sin piloto: los `subEventType` de una lectura de QR, el nombre de las
+partes del evento y la hora en que el equipo lee `Valid` se confirman con el
+terminal al lado (`docs/investigacion-hikvision-terminales-qr.md` §9 de la
+plataforma).
 
 ### Hikvision: tres endpoints, y hay que confirmar con la cámara al lado
 
