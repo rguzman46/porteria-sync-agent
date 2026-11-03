@@ -69,6 +69,14 @@ type QueuedEvent struct {
 	// Metadata adicional (vendor-specific fields, etc.).
 	Metadata map[string]any `json:"metadata,omitempty"`
 
+	// CredentialType y Credential: la lectura de un lector que no es de
+	// placas —un QR, una tarjeta, un tag— (ADR-130 de la plataforma). Con
+	// ellos el evento va a `/credential-event/multipart` y `Plate` queda
+	// vacía. Opened es lo que dijo el equipo: abrió, negó o nil si no lo dijo.
+	CredentialType string `json:"credential_type,omitempty"`
+	Credential     string `json:"credential,omitempty"`
+	Opened         *bool  `json:"opened,omitempty"`
+
 	// SnapshotMimeType del .bin file. Generalmente "image/jpeg". El cloud
 	// convierte a WebP server-side.
 	SnapshotMimeType string `json:"snapshot_mime_type,omitempty"`

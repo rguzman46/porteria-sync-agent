@@ -70,6 +70,8 @@ func NewReceiver(cfg *Config, queue *FileQueue) *Receiver {
 	}
 	mux.HandleFunc("/lpr-event", r.soloDesdeLaCamara(r.handleLprEvent))
 	mux.HandleFunc("/axis-event", r.soloDesdeLaCamara(r.handleAxisEvent))
+	// Eventos de acceso de los terminales Hikvision DS-K1T (QR del pase).
+	mux.HandleFunc("/acs-event", r.soloDesdeLaCamara(r.handleAccessEvent))
 	// Rutas nativas de Dahua ITSAPI: la cámara no deja cambiarlas.
 	mux.HandleFunc("/NotificationInfo/TollgateInfo", r.soloDesdeLaCamara(r.handleDahuaTollgate))
 	mux.HandleFunc("/NotificationInfo/KeepAlive", r.soloDesdeLaCamara(r.handleDahuaKeepAlive))
@@ -237,6 +239,18 @@ func (r *Receiver) handleLprEvent(w http.ResponseWriter, req *http.Request) {
 	r.encolarYResponder(w, req, source, event, escena, recorte, err)
 }
 
+// handleAccessEvent recibe los eventos de acceso de un terminal Hikvision
+// DS-K1T. Ver adapter_hikvision_acs.go.
+func (r *Receiver) handleAccessEvent(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	req.Body = http.MaxBytesReader(w, req.Body, r.maxSize)
+	event, foto, err := parseHikvisionAccessEvent(req)
+	r.encolarYResponder(w, req, "hikvision", event, foto, nil, err)
+}
+
 // handleAxisEvent es la ruta para el ACAP License Plate Verifier, que manda
 // JSON y no pone cabeceras propias.
 func (r *Receiver) handleAxisEvent(w http.ResponseWriter, req *http.Request) {
@@ -280,22 +294,28 @@ func (r *Receiver) encolarYResponder(w http.ResponseWriter, req *http.Request, s
 		http.Error(w, "parse error: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if event.Plate == "" {
+	credencial := event.CredentialType != ""
+	if event.Plate == "" && !credencial {
 		http.Error(w, "evento sin placa", http.StatusBadRequest)
 		return
 	}
-	if len(escena) == 0 {
+	if len(escena) == 0 && !credencial {
 		// Sin foto no encolamos — este receptor es para la captura visual.
+		// La lectura de un pase sí: el ingreso cuenta aunque el equipo no
+		// tenga encendida la subida de la foto.
 		http.Error(w, "evento sin imagen (este receptor requiere la foto — usa /api/v1/access/event para texto solo)", http.StatusBadRequest)
 		return
 	}
 
-	escena, mime, err := acotarFoto(escena, event.SnapshotMimeType)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
-		return
+	if len(escena) > 0 {
+		var mime string
+		escena, mime, err = acotarFoto(escena, event.SnapshotMimeType)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
+		event.SnapshotMimeType = mime
 	}
-	event.SnapshotMimeType = mime
 	if len(recorte) > 0 {
 		recorte, _, err = acotarFoto(recorte, "image/jpeg")
 		if err != nil {

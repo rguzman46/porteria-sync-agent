@@ -23,6 +23,8 @@ const (
 	rutaWhitelist      = "/api/v1/access/whitelist"
 	rutaHeartbeat      = "/api/v1/access/heartbeat"
 	rutaEventMultipart = "/api/v1/access/event/multipart"
+	// La lectura de un QR, una tarjeta o un tag (ADR-130 de la plataforma).
+	rutaCredencialMultipart = "/api/v1/access/credential-event/multipart"
 )
 
 // Plate representa una entrada del whitelist devuelto por el cloud.
@@ -56,6 +58,25 @@ type Whitelist struct {
 	// vez de tomarlas por permitidas.
 	BlockedPlates []Plate         `json:"blocked_plates"`
 	Device        *DeviceMetadata `json:"device,omitempty"`
+	// Credentials son los pases que un lector de QR tiene que dejar pasar.
+	// La plataforma solo los manda a un lector cuya familia lee QR; a una
+	// cámara de placas nunca. BlockedCredentials va aparte por la misma razón
+	// que BlockedPlates.
+	Credentials        []Credential `json:"credentials,omitempty"`
+	BlockedCredentials []Credential `json:"blocked_credentials,omitempty"`
+	MaxCredentials     *int         `json:"max_credentials,omitempty"`
+}
+
+// Credential es un pase para un lector que no es de placas. `Holder` es el
+// titular que el equipo guarda (`v:<id>` para un pase de visitante): en
+// Hikvision, ZKTeco, Dahua y Suprema la vigencia es de la persona, no de la
+// tarjeta. Las fechas vienen en UTC sin zona.
+type Credential struct {
+	Type       string `json:"type"`       // "qr" | "tarjeta" | "tag_uhf" | "pin"
+	Credential string `json:"credential"` // el número que compara el equipo
+	Holder     string `json:"holder"`
+	ValidFrom  string `json:"valid_from"`
+	ValidUntil string `json:"valid_until"`
 }
 
 // CloudClient encapsula las llamadas HTTPS al cloud de Porteria Plus.
@@ -180,6 +201,9 @@ type HeartbeatResult struct {
 type Capacidades struct {
 	Whitelist bool
 	Blocklist bool
+	// Credenciales: el adaptador escribe pases (QR, tarjetas) en el equipo.
+	// Lo implementa con `LectorDeCredenciales`.
+	Credenciales bool
 }
 
 // HeartbeatReport es lo que el agent cuenta de sí mismo en cada latido.
@@ -298,7 +322,11 @@ func (c *CloudClient) PostEventMultipart(ctx context.Context, ev *QueuedEvent, s
 		return PostEventPermanent, nil, fmt.Errorf("construyendo multipart: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+rutaEventMultipart, body)
+	ruta := rutaEventMultipart
+	if ev.CredentialType != "" {
+		ruta = rutaCredencialMultipart
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+ruta, body)
 	if err != nil {
 		return PostEventPermanent, nil, err
 	}
@@ -353,6 +381,16 @@ func buildEventMultipartBody(ev *QueuedEvent, snapshot, recorte []byte) (io.Read
 		"plate":           ev.Plate,
 		"client_event_id": ev.ClientEventID,
 	}
+	// Una lectura de credencial lleva su número en vez de la placa, y lo que
+	// hizo el equipo. Sin placa, confianza ni recuadro: no aplican.
+	if ev.CredentialType != "" {
+		delete(datos, "plate")
+		datos["credential_type"] = ev.CredentialType
+		datos["credential"] = ev.Credential
+		if ev.Opened != nil {
+			datos["opened"] = *ev.Opened
+		}
+	}
 	if datos["client_event_id"] == "" {
 		datos["client_event_id"] = ev.ID
 	}
@@ -391,8 +429,12 @@ func buildEventMultipartBody(ev *QueuedEvent, snapshot, recorte []byte) (io.Read
 	if mimeType == "" {
 		mimeType = "image/jpeg"
 	}
-	if err := escribirImagen(mw, "snapshot", "snapshot.jpg", mimeType, snapshot); err != nil {
-		return nil, "", err
+	// Una lectura de pase puede venir sin foto; una de placa no (el receptor
+	// ya la exige).
+	if len(snapshot) > 0 || ev.CredentialType == "" {
+		if err := escribirImagen(mw, "snapshot", "snapshot.jpg", mimeType, snapshot); err != nil {
+			return nil, "", err
+		}
 	}
 	if len(recorte) > 0 {
 		if err := escribirImagen(mw, "plate_crop", "plate_crop.jpg", "image/jpeg", recorte); err != nil {

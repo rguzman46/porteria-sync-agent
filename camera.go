@@ -39,6 +39,18 @@ type CameraAdapter interface {
 	SyncWhitelist(ctx context.Context, plates []Plate, blocked []Plate) error
 }
 
+// LectorDeCredenciales es lo que agrega un adaptador de un lector que no es
+// de placas —un terminal que lee el QR del pase, una controladora con
+// tarjetas— (ADR-130 de la plataforma). Es opcional a propósito: las
+// cámaras de placas no cambian, y un adaptador nuevo de cualquier marca solo
+// implementa esto y declara `Capacidades().Credenciales`.
+//
+// SyncCredentials deja en el equipo exactamente los pases de la lista y
+// tiene que ser idempotente, como SyncWhitelist.
+type LectorDeCredenciales interface {
+	SyncCredentials(ctx context.Context, credenciales []Credential) error
+}
+
 // resolveVendorFamily determina qué adapter exacto cargar.
 //
 // Hikvision tiene tres formas de recibir la lista según la línea y el
@@ -98,6 +110,10 @@ func NewCameraAdapter(cfg *Config) (CameraAdapter, error) {
 		return NewHikvisionITCAdapter(c.Host, c.Port, c.User, c.Password), nil
 	case "hikvision_anpr_audit":
 		return NewHikvisionAuditAdapter(c.Host, c.Port, c.User, c.Password), nil
+	case "hikvision_dsk1t_qr_camara", "hikvision_dsk1t_qr_modulo":
+		// Terminales faciales que leen el QR del pase: mismo ISAPI para las
+		// dos familias; cambia dónde lee el QR, no cómo se le habla.
+		return NewHikvisionDSK1TAdapter(family, c.Host, c.Port, c.User, c.Password), nil
 	// ── Dahua ────────────────────────────────────────────────────
 	case "dahua_itc":
 		return NewDahuaITCAdapter(c.Host, c.Port, c.User, c.Password), nil

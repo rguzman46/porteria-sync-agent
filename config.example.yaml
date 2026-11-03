@@ -38,6 +38,10 @@ camera:
   #   dahua_itc            — Dahua ITC (ITC215, ITC237, ...). Recibe lecturas; la
   #                          escritura de la lista NO está confirmada (ver README).
   #   axis_vapix           — Axis con ACAP "License Plate Verifier" instalado.
+  #   hikvision_dsk1t_qr_camara / hikvision_dsk1t_qr_modulo
+  #                        — terminales faciales Hikvision que leen el QR del pase
+  #                          (DS-K1T680DF-E1, DS-K1T670MWX-QR, ...). Carga pases, no
+  #                          placas, y recibe sus eventos en /acs-event.
   #
   # Cuál de las tres de Hikvision acepta una cámara concreta se confirma con la
   # cámara al lado (README, «Hikvision: tres endpoints»). Vacío y `type:
