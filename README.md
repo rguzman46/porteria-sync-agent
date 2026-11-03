@@ -416,7 +416,8 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 | Versión | Lo que añade |
 |---|---|
-| **v1.5.0** | Axis recuerda lo que empujó tras un reinicio (`estado/axis_<host>_<puerto>.json`): sin esto, una placa dada de baja seguía abriendo en una Axis si el agente se había reiniciado. |
+| **v1.6.0** | Lectores de credenciales (ADR-130 de la plataforma): terminales faciales Hikvision con QR (`hikvision_dsk1t_qr_camara` / `_modulo`). Carga los pases por ISAPI —un titular por pase, vigencia en hora de Bogotá, el código como tarjeta, sin tocar a los residentes— y sube sus lecturas desde `/acs-event` a `/api/v1/access/credential-event/multipart`. **Beta, sin piloto con el equipo.** |
+| v1.5.0 | Axis recuerda lo que empujó tras un reinicio (`estado/axis_<host>_<puerto>.json`): sin esto, una placa dada de baja seguía abriendo en una Axis si el agente se había reiniciado. |
 | v1.4.0 | Contrato v1 de la API (`/api/v1/access/...`, llave `ppk_`, `client_event_id`, `confidence`, `plate_box`, `plate_crop`, sin `timestamp` vacío). Lista negra en Hikvision y Axis; `whitelist_supported`/`blocklist_supported` en el latido. Receptores nativos Dahua ITSAPI y Axis LPV; Hikvision identifica escena y recorte por nombre y recibe 200 vacío. Filtro por IP de origen (403), receiver encendido de fábrica, firewall desde el instalador, binario de la misma release. Reintentos sin descarte por red/5xx, back-off tope 5 min. Fotos > 4 MB recomprimidas. Cola 0600/0700. `log.file` con rotación. Build linux-arm64. |
 | v1.3.0 | Plug-and-play multi-vendor, `digestClient` compartido y auto-configuración del adapter. |
 | v0.2.0 | Receiver `:8787` + cola en disco + replay worker. |
