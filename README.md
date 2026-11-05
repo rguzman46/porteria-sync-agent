@@ -53,8 +53,15 @@ $DeviceToken  = 'ppd_...'                          # el token de ESTA cámara
 $CloudUrl     = 'https://miconjunto.porteriaplus.com'
 $CameraType   = 'hikvision'                        # hikvision | dahua | axis
 $VendorFamily = 'hikvision_itc'                    # opcional, según el modelo
-iex (irm "$CloudUrl/integrations/install-script.ps1")
+$guion = irm "$CloudUrl/integrations/install-script.ps1"
+& ([scriptblock]::Create($guion)) -Token $Token -DeviceToken $DeviceToken -CloudUrl $CloudUrl -CameraType $CameraType -VendorFamily $VendorFamily
 ```
+
+**Como bloque, no con `iex`.** `iex` ejecuta el guion en la misma ventana: su
+`param()` borra `$Token`, `$DeviceToken`… y se cae con «You cannot call a
+method on a null-valued expression» antes de preguntar nada. Pasándole los
+datos por parámetro a un `scriptblock` no depende de eso. El panel de la
+plataforma arma el bloque así desde el 2026-11-05.
 
 Lo único que pregunta es lo que el panel no puede saber: **la IP de la cámara
 y su usuario y contraseña**. Y no se pasan por la URL a propósito: quedarían
