@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -104,8 +105,10 @@ func TestAxisRecuerdaLoQueEmpujoTrasUnReinicio(t *testing.T) {
 	if err := antes.SyncWhitelist(testContext(), []Plate{{Plate: "AAA111"}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := os.Stat(estado); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("estado no guardado con 0600: %v", err)
+	if info, err := os.Stat(estado); err != nil {
+		t.Fatalf("estado no guardado: %v", err)
+	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("estado guardado con %o, esperaba 0600", info.Mode().Perm())
 	}
 
 	// El agente se reinicia y la placa ya no está en la plataforma.
@@ -118,6 +121,12 @@ func TestAxisRecuerdaLoQueEmpujoTrasUnReinicio(t *testing.T) {
 }
 
 func TestLaColaGuardaConPermisosRestringidos(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows no tiene bits de Unix: Go reporta 0666/0777 siempre. Allá
+		// la carpeta la cierra el instalador con permisos de Windows (solo
+		// Administradores y el sistema). Se prueba en el CI, que es Linux.
+		t.Skip("permisos de Unix: se prueban en Linux")
+	}
 	dir := filepath.Join(t.TempDir(), "queue")
 	q, err := NewFileQueue(dir, 10, 1024*1024)
 	if err != nil {

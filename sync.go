@@ -55,6 +55,9 @@ type Syncer struct {
 	// avisoSinSoporte evita repetir cada minuto que el adaptador no escribe
 	// listas: se dice una vez por adaptador y queda en el latido.
 	avisoSinSoporte string
+
+	// estado es lo que pinta el panel local. Nulo: no hay panel.
+	estado *Estado
 }
 
 func NewSyncer(cloud *CloudClient, cfg *Config, camera CameraAdapter, intervalSeconds int) *Syncer {
@@ -71,6 +74,12 @@ func NewSyncer(cloud *CloudClient, cfg *Config, camera CameraAdapter, intervalSe
 // está apagado, no hay nada encolándose.
 func (s *Syncer) ConCola(q ColaConEstadisticas) *Syncer {
 	s.queue = q
+	return s
+}
+
+// ConEstado le da al Syncer dónde anotar lo que muestra el panel local.
+func (s *Syncer) ConEstado(e *Estado) *Syncer {
+	s.estado = e
 	return s
 }
 
@@ -102,6 +111,7 @@ func (s *Syncer) anotarPush(err error, placas int) {
 
 	ok := err == nil
 	s.lastPushOK = &ok
+	s.estado.EquipoCargado(err, placas)
 	if ok {
 		s.lastPushError = ""
 		s.lastPlatesCount = placas
@@ -144,6 +154,7 @@ func (s *Syncer) cycle(ctx context.Context) {
 	if err != nil {
 		s.consecutiveErrors++
 		log.Printf("[sync] heartbeat falló (consecutivos=%d): %v", s.consecutiveErrors, err)
+		s.estado.Nube(err)
 		s.backoff()
 		return
 	}
@@ -159,12 +170,14 @@ func (s *Syncer) cycle(ctx context.Context) {
 	if err != nil {
 		s.consecutiveErrors++
 		log.Printf("[sync] fetch whitelist falló (consecutivos=%d): %v", s.consecutiveErrors, err)
+		s.estado.Nube(err)
 		s.backoff()
 		return
 	}
 
 	// Heartbeat + fetch OK → resetear contador de errores.
 	s.consecutiveErrors = 0
+	s.estado.Nube(nil)
 
 	if !changed {
 		log.Printf("[sync] sin cambios (304)")
@@ -172,6 +185,7 @@ func (s *Syncer) cycle(ctx context.Context) {
 	}
 
 	if wl.Device != nil {
+		s.estado.ConModelo(wl.Device.DeviceModel)
 		s.maybeReconfigureAdapter(wl.Device)
 	}
 

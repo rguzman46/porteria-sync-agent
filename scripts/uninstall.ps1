@@ -43,32 +43,32 @@ Write-Host "  Porteria Sync Agent — Desinstalación __VERSION__" -ForegroundCo
 Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-$exePath = Join-Path $InstallDir 'porteria-agent.exe'
 
 # ─────────────────────────────────────────────────────────────────────────
 # 1. Detener servicio (si está corriendo)
 # ─────────────────────────────────────────────────────────────────────────
 
-$svc = Get-Service -Name 'PorteriaSyncAgent' -ErrorAction SilentlyContinue
-if ($svc) {
+# Todas las copias del agente en este PC: PorteriaSyncAgent y, si la
+# portería tiene más de un equipo, PorteriaSyncAgent-2, -3…
+$servicios = @(Get-Service -Name 'PorteriaSyncAgent*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^PorteriaSyncAgent(-\d+)?$' })
+if ($servicios.Count -eq 0) {
+    Write-Host "▸ No había ningún servicio del agente instalado — saltando"
+}
+foreach ($svc in $servicios) {
     if ($svc.Status -eq 'Running') {
-        Write-Host "▸ Deteniendo servicio..."
-        Stop-Service -Name 'PorteriaSyncAgent' -Force -ErrorAction SilentlyContinue
+        Write-Host "▸ Deteniendo $($svc.Name)..."
+        Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     }
-
-    Write-Host "▸ Desregistrando servicio..."
-    if (Test-Path $exePath) {
-        & $exePath -uninstall 2>&1 | Out-Null
-    } else {
-        # El binario ya no está pero el servicio sigue registrado.
-        # Lo borramos con sc.exe como fallback.
-        sc.exe delete 'PorteriaSyncAgent' | Out-Null
-    }
+    Write-Host "▸ Desregistrando $($svc.Name)..."
+    sc.exe delete $svc.Name | Out-Null
     Write-Host "  ✓ Servicio eliminado"
-} else {
-    Write-Host "▸ El servicio 'PorteriaSyncAgent' no estaba instalado — saltando"
 }
+
+# Las reglas del firewall que abrió el instalador, una por copia.
+Get-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR*' -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
 # ─────────────────────────────────────────────────────────────────────────
 # 2. Quitar exclusiones de Windows Defender

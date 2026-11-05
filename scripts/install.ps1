@@ -164,6 +164,46 @@ if (-not $CameraPassword) {
     $CameraPassword = [System.Net.NetworkCredential]::new('', $secPwd).Password
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# 1.b Qué copia del agente es esta
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Cada equipo de la portería (la cámara de la reja, el terminal de la puerta)
+# es una copia del agente con su carpeta, su servicio y su puerto, y se
+# reconoce por su token (`ppd_…`). El primero va en C:\PorteriaAgent como
+# siempre; los siguientes en C:\PorteriaAgent\equipo-N, con el servicio
+# PorteriaSyncAgent-N y el puerto 8786+N. Volver a pegar el bloque de un
+# equipo ya instalado lo actualiza en su misma carpeta.
+
+function Get-TokenDelConfig([string]$ruta) {
+    if (-not (Test-Path $ruta)) { return $null }
+    $m = Select-String -Path $ruta -Pattern '^\s*device_token:\s*"?([^"\s]+)"?' | Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value }
+    return $null
+}
+
+$ServiceName = 'PorteriaSyncAgent'
+if (-not $PSBoundParameters.ContainsKey('InstallDir')) {
+    $tokenRaiz = Get-TokenDelConfig (Join-Path $InstallDir 'config.yaml')
+    if ($tokenRaiz -and $tokenRaiz -ne $DeviceToken) {
+        $n = $null
+        foreach ($carpeta in (Get-ChildItem $InstallDir -Directory -Filter 'equipo-*' -ErrorAction SilentlyContinue)) {
+            if ((Get-TokenDelConfig (Join-Path $carpeta.FullName 'config.yaml')) -eq $DeviceToken) {
+                $n = [int]($carpeta.Name -replace '^equipo-', '')
+                break
+            }
+        }
+        if (-not $n) {
+            $n = 2
+            while (Test-Path (Join-Path $InstallDir "equipo-$n")) { $n++ }
+        }
+        $InstallDir = Join-Path $InstallDir "equipo-$n"
+        $ServiceName = "PorteriaSyncAgent-$n"
+        if (-not $PSBoundParameters.ContainsKey('ReceiverPort')) { $ReceiverPort = 8786 + $n }
+        Write-Host "▸ Este PC ya tiene otro equipo instalado: este va como equipo $n (puerto $ReceiverPort)." -ForegroundColor Cyan
+    }
+}
+
 Write-Host ""
 Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "  Porteria Sync Agent — Instalación __VERSION__" -ForegroundColor Cyan
@@ -203,9 +243,9 @@ try {
 $exePath = Join-Path $InstallDir 'porteria-agent.exe'
 
 # Si hay un servicio corriendo, detenerlo antes de sobrescribir el .exe.
-if (Get-Service -Name 'PorteriaSyncAgent' -ErrorAction SilentlyContinue) {
+if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Write-Host "▸ Deteniendo servicio existente para reemplazar binario..."
-    Stop-Service -Name 'PorteriaSyncAgent' -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
 }
 
@@ -332,7 +372,10 @@ try {
 # Solo para la IP de la cámara — el agent además filtra por origen.
 
 Write-Host "▸ Abriendo el puerto $ReceiverPort en el firewall para $CameraHost ..."
+# El mismo nombre que calcula el agente (`reglaDeFirewall`): el panel local
+# la actualiza cuando el técnico cambia la IP del equipo.
 $ruleName = 'Porteria Sync Agent - receptor LPR'
+if ($ServiceName -ne 'PorteriaSyncAgent') { $ruleName = "$ruleName ($ServiceName)" }
 try {
     $regla = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
     if ($regla) {
@@ -355,20 +398,20 @@ try {
 Write-Host "▸ Registrando como Windows Service..."
 
 # Si ya está instalado, desinstalar primero para refrescar la config.
-if (Get-Service -Name 'PorteriaSyncAgent' -ErrorAction SilentlyContinue) {
-    & $exePath -uninstall 2>&1 | Out-Null
+if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+    & $exePath -config $configPath -service-name $ServiceName -uninstall 2>&1 | Out-Null
     Start-Sleep -Seconds 2
 }
 
-& $exePath -install
+& $exePath -config $configPath -service-name $ServiceName -install
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ✗ Error registrando el servicio." -ForegroundColor Red
     exit 1
 }
-Write-Host "  ✓ Servicio registrado como 'PorteriaSyncAgent'"
+Write-Host "  ✓ Servicio registrado como '$ServiceName'"
 
 Write-Host "▸ Arrancando servicio..."
-& $exePath -start
+& $exePath -config $configPath -service-name $ServiceName -start
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ⚠ El servicio se registró pero no arrancó. Revisa $InstallDir\agent.log" -ForegroundColor Yellow
 } else {
@@ -386,7 +429,7 @@ Write-Host "  ✓ INSTALACIÓN COMPLETA" -ForegroundColor Green
 Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Estado del servicio:"
-$svc = Get-Service -Name 'PorteriaSyncAgent' -ErrorAction SilentlyContinue
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($svc) {
     Write-Host "    $($svc.DisplayName) — $($svc.Status)"
 } else {
@@ -396,13 +439,15 @@ if ($svc) {
 Write-Host ""
 Write-Host "  Próximos pasos:"
 Write-Host "    1. Verifica logs:    Get-Content $InstallDir\agent.log -Tail 20"
-Write-Host "    2. Estado servicio:  Get-Service PorteriaSyncAgent"
+Write-Host "    2. Estado y datos del equipo: abre http://localhost:$ReceiverPort en este PC"
 Write-Host "    3. Panel cloud:      $CloudUrl/integrations"
 Write-Host "       (debes ver 'última sync' actualizado en pocos segundos)"
 Write-Host "    4. En la cámara, apunta el envío de eventos a:"
 $ipLocal = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
 if (-not $ipLocal) { $ipLocal = '<IP de este PC>' }
-switch -Wildcard ($CameraType) {
+$familiaOTipo = if ($VendorFamily) { $VendorFamily } else { $CameraType }
+switch -Wildcard ($familiaOTipo) {
+    'hikvision_dsk1t*' { Write-Host "       http://${ipLocal}:$ReceiverPort/acs-event  (HTTP Listening del terminal)" }
     'dahua*' { Write-Host "       http://${ipLocal}:$ReceiverPort/NotificationInfo/TollgateInfo  (ITSAPI: responde {""Result"": true})" }
     'axis*'  { Write-Host "       http://${ipLocal}:$ReceiverPort/axis-event  (License Plate Verifier, HTTP POST JSON)" }
     default  { Write-Host "       http://${ipLocal}:$ReceiverPort/lpr-event  (HTTP Listening, multipart)" }

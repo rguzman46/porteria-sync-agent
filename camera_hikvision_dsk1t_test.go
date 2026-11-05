@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,11 @@ func (t *terminalSimulado) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, p := range t.personas {
 			todos = append(todos, p)
 		}
+		// En orden, como el equipo: un mapa de Go cambia de orden en cada
+		// vuelta, y paginarlo así se saltaba personas al azar.
+		sort.Slice(todos, func(i, j int) bool {
+			return todos[i]["employeeNo"].(string) < todos[j]["employeeNo"].(string)
+		})
 		// Páginas de dos para obligar a recorrerlas.
 		fin := pos + 2
 		estado := "MORE"

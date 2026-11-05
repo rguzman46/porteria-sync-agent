@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -321,4 +325,118 @@ func (c *Config) ReceiverEnabled() bool {
 
 func listaDeFamilias() string {
 	return "hikvision_traffic, hikvision_itc, hikvision_anpr_audit, dahua_itc, axis_vapix"
+}
+
+// CambiosDelEquipo es lo que el panel local deja cambiar sin reinstalar: lo
+// que cambia en la portería (la IP que le dio el router, la contraseña que
+// alguien cambió en el equipo). La llave, el token y la plataforma no: esos
+// salen del panel del conjunto y se cambian reinstalando.
+type CambiosDelEquipo struct {
+	Host     string
+	Port     int
+	User     string
+	Password string // vacía: se deja la que estaba
+}
+
+var hostValido = regexp.MustCompile(`^[A-Za-z0-9.\-]{1,253}$`)
+
+func (c CambiosDelEquipo) validar() error {
+	c.Host = strings.TrimSpace(c.Host)
+	if net.ParseIP(c.Host) == nil && !hostValido.MatchString(c.Host) {
+		return fmt.Errorf("la IP del equipo no es válida")
+	}
+	if c.Port < 1 || c.Port > 65535 {
+		return fmt.Errorf("el puerto va de 1 a 65535")
+	}
+	if strings.TrimSpace(c.User) == "" || len(c.User) > 64 || strings.ContainsAny(c.User, "\r\n\t") {
+		return fmt.Errorf("escribe el usuario del equipo")
+	}
+	if len(c.Password) > 128 || strings.ContainsAny(c.Password, "\r\n") {
+		return fmt.Errorf("la contraseña no es válida")
+	}
+	return nil
+}
+
+// actualizarEquipo cambia la sección `camera` del config.yaml y deja todo lo
+// demás como estaba, comentarios incluidos. Valida el resultado completo
+// antes de escribir: un config que no carga deja el servicio sin arrancar, y
+// eso en una portería es la talanquera sin lista nueva.
+//
+// Escribe sobre el mismo archivo (no uno nuevo renombrado) para que conserve
+// sus permisos: el instalador lo deja legible solo para Administradores y el
+// sistema, porque lleva la contraseña del equipo. Antes guarda una copia.
+func actualizarEquipo(path string, c CambiosDelEquipo) error {
+	c.Host = strings.TrimSpace(c.Host)
+	c.User = strings.TrimSpace(c.User)
+	if err := c.validar(); err != nil {
+		return err
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("leyendo %s: %w", path, err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(original, &doc); err != nil {
+		return fmt.Errorf("el config actual no se puede leer: %w", err)
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("el config actual no tiene el formato esperado")
+	}
+	camara := hijoMapa(doc.Content[0], "camera")
+	ponerValor(camara, "host", c.Host, "!!str")
+	ponerValor(camara, "port", strconv.Itoa(c.Port), "!!int")
+	ponerValor(camara, "user", c.User, "!!str")
+	if c.Password != "" {
+		ponerValor(camara, "password", c.Password, "!!str")
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2) // como lo escribe el instalador
+	if err := enc.Encode(&doc); err != nil {
+		return err
+	}
+	_ = enc.Close()
+	nuevo := buf.Bytes()
+	prueba := &Config{}
+	if err := yaml.Unmarshal(nuevo, prueba); err != nil {
+		return err
+	}
+	prueba.applyDefaults()
+	if err := prueba.validate(); err != nil {
+		return err
+	}
+	_ = os.WriteFile(path+".bak-panel", original, 0o600)
+	return os.WriteFile(path, nuevo, 0o600)
+}
+
+// hijoMapa devuelve el mapa `clave` dentro de `padre`, creándolo si falta.
+func hijoMapa(padre *yaml.Node, clave string) *yaml.Node {
+	for i := 0; i+1 < len(padre.Content); i += 2 {
+		if padre.Content[i].Value == clave {
+			return padre.Content[i+1]
+		}
+	}
+	hijo := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	padre.Content = append(padre.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: clave}, hijo)
+	return hijo
+}
+
+func ponerValor(mapa *yaml.Node, clave, valor, tag string) {
+	for i := 0; i+1 < len(mapa.Content); i += 2 {
+		if mapa.Content[i].Value == clave {
+			v := mapa.Content[i+1]
+			v.Kind, v.Tag, v.Value, v.Style = yaml.ScalarNode, tag, valor, 0
+			if tag == "!!str" {
+				v.Style = yaml.DoubleQuotedStyle
+			}
+			return
+		}
+	}
+	v := &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: valor}
+	if tag == "!!str" {
+		v.Style = yaml.DoubleQuotedStyle
+	}
+	mapa.Content = append(mapa.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: clave}, v)
 }
