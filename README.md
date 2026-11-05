@@ -75,6 +75,37 @@ El guion hace, en orden:
 5. Registra y arranca el servicio `PorteriaSyncAgent`.
 6. Imprime la URL exacta que hay que configurar en la cámara según su marca.
 
+### Varios equipos en el mismo PC
+
+Una portería puede tener la cámara de placas de la reja **y** el terminal
+facial de la puerta. Cada equipo se registra aparte en el panel y cada uno
+trae su bloque: se pegan los dos en el mismo PC, uno detrás del otro. El
+instalador reconoce el equipo por su token (`ppd_…`):
+
+| Equipo | Carpeta | Servicio | Puerto |
+|---|---|---|---|
+| El primero | `C:\PorteriaAgent` | `PorteriaSyncAgent` | 8787 |
+| El segundo | `C:\PorteriaAgent\equipo-2` | `PorteriaSyncAgent-2` | 8788 |
+| El n-ésimo | `C:\PorteriaAgent\equipo-N` | `PorteriaSyncAgent-N` | 8786+N |
+
+Cada copia es independiente: si una se cae, la otra sigue. Volver a pegar el
+bloque de un equipo ya instalado lo actualiza en su misma carpeta. El
+desinstalador quita todas.
+
+### El panel local: `http://localhost:8787`
+
+Abierto **en el PC de la portería**, muestra en verde o en rojo si el agente
+habla con la plataforma y con el equipo, cuántos pases o placas tiene
+cargados y cuándo fue el último aviso del equipo, con los demás equipos del
+mismo PC debajo. Desde ahí se cambian la IP, el puerto, el usuario y la
+contraseña del equipo: se guarda, el agente se reinicia por dentro y, si
+cambió la IP, actualiza también la regla del firewall.
+
+Solo le contesta a ese PC (conexión desde 127.0.0.1 **y** dirección
+`localhost`), guardar exige que el formulario venga de la misma página, y
+nunca muestra la contraseña guardada. La llave, el token y la plataforma no
+se cambian ahí: salen del panel del conjunto y se cambian reinstalando.
+
 ### Los dos tokens, y por qué van los dos
 
 Es el error de instalación más caro y no se nota el día que pasa:
@@ -416,6 +447,7 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 | Versión | Lo que añade |
 |---|---|
+| **v1.7.0** | Varios equipos en un PC (una copia por equipo: `C:\PorteriaAgent\equipo-N`, servicio `PorteriaSyncAgent-N`, puerto 8786+N; flag `-service-name`). Panel local en `http://localhost:<puerto>` con el estado y los datos del equipo; guardar valida el config completo, conserva el resto del archivo y sus permisos, recarga el agente por dentro y actualiza la regla del firewall. Windows reinicia el servicio si se cae (`OnFailure`). El instalador imprime `/acs-event` para los terminales con QR. |
 | **v1.6.0** | Lectores de credenciales (ADR-130 de la plataforma): terminales faciales Hikvision con QR (`hikvision_dsk1t_qr_camara` / `_modulo`). Carga los pases por ISAPI —un titular por pase, vigencia en hora de Bogotá, el código como tarjeta, sin tocar a los residentes— y sube sus lecturas desde `/acs-event` a `/api/v1/access/credential-event/multipart`. **Beta, sin piloto con el equipo.** |
 | v1.5.0 | Axis recuerda lo que empujó tras un reinicio (`estado/axis_<host>_<puerto>.json`): sin esto, una placa dada de baja seguía abriendo en una Axis si el agente se había reiniciado. |
 | v1.4.0 | Contrato v1 de la API (`/api/v1/access/...`, llave `ppk_`, `client_event_id`, `confidence`, `plate_box`, `plate_crop`, sin `timestamp` vacío). Lista negra en Hikvision y Axis; `whitelist_supported`/`blocklist_supported` en el latido. Receptores nativos Dahua ITSAPI y Axis LPV; Hikvision identifica escena y recorte por nombre y recibe 200 vacío. Filtro por IP de origen (403), receiver encendido de fábrica, firewall desde el instalador, binario de la misma release. Reintentos sin descarte por red/5xx, back-off tope 5 min. Fotos > 4 MB recomprimidas. Cola 0600/0700. `log.file` con rotación. Build linux-arm64. |

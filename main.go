@@ -20,6 +20,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/kardianos/service"
@@ -31,17 +35,69 @@ const (
 	ServiceDescription = "Sincroniza placas autorizadas con la cámara LPR local del conjunto."
 )
 
+// nombreDeServicioValido: el nombre va a la línea de comandos del servicio y
+// al nombre de la regla del firewall.
+var nombreDeServicioValido = regexp.MustCompile(`^PorteriaSyncAgent(-[0-9]{1,2})?$`)
+
 // program implementa service.Interface — la API estándar de kardianos/service
 // para registrarse como Windows Service / launchd / systemd.
 type program struct {
-	cfg    *Config
-	cancel context.CancelFunc
+	cfg        *Config
+	configPath string
+	servicio   string
+	cancel     context.CancelFunc
+
+	// recarga la pide el panel local después de guardar: se apaga todo lo de
+	// adentro y se vuelve a arrancar con el config nuevo, sin reiniciar el
+	// servicio de Windows.
+	recarga chan struct{}
 }
 
 func (p *program) Start(s service.Service) error {
 	// Start no debe bloquear — la lógica corre en goroutine separada.
-	go p.run()
+	go p.ciclo()
 	return nil
+}
+
+// ciclo corre el agente y lo vuelve a arrancar cada vez que el panel local
+// cambia el config. Si el config nuevo no carga —no debería: el panel lo
+// valida antes de escribirlo— sigue con el anterior.
+func (p *program) ciclo() {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	defer cancel()
+	for {
+		vuelta, terminar := context.WithCancel(ctx)
+		hecho := make(chan struct{})
+		go func() {
+			p.run(vuelta)
+			close(hecho)
+		}()
+		select {
+		case <-ctx.Done():
+			terminar()
+			<-hecho
+			return
+		case <-p.recarga:
+			log.Println("[main] el config cambió desde el panel local: reiniciando el agente por dentro")
+			terminar()
+			<-hecho
+			if cfg, _, err := loadConfig(p.configPath); err != nil {
+				log.Printf("[main] ⚠ el config nuevo no carga (%v): sigo con el anterior", err)
+			} else {
+				p.cfg = cfg
+			}
+		}
+	}
+}
+
+// pedirRecarga es lo que llama el panel. No bloquea: si ya hay una pedida,
+// esa basta.
+func (p *program) pedirRecarga() {
+	select {
+	case p.recarga <- struct{}{}:
+	default:
+	}
 }
 
 func (p *program) Stop(s service.Service) error {
@@ -52,10 +108,13 @@ func (p *program) Stop(s service.Service) error {
 	return nil
 }
 
-func (p *program) run() {
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-	defer cancel()
+// run arranca todo y bloquea hasta que ctx se cancele, y no vuelve hasta que
+// el receptor soltó el puerto: la siguiente vuelta lo necesita libre.
+func (p *program) run(ctx context.Context) {
+	var vivos sync.WaitGroup
+	defer vivos.Wait()
+
+	estado := NuevoEstado(p.cfg, p.servicio, filepath.Dir(p.configPath))
 
 	log.Printf("[main] arrancando sync agent v%s (cloud=%s, camera=%s @ %s, receiver=%v)",
 		AgentVersion, p.cfg.Cloud.BaseURL, p.cfg.Camera.Type, p.cfg.Camera.Host, p.cfg.ReceiverEnabled())
@@ -93,15 +152,21 @@ func (p *program) run() {
 			log.Fatalf("[main] error inicializando queue local: %v", err)
 		}
 
-		receiver := NewReceiver(p.cfg, queue)
+		panel := NuevoPanelLocal(p.cfg, p.configPath, p.servicio, estado, p.pedirRecarga)
+		receiver := NewReceiver(p.cfg, queue).ConPanel(panel, estado)
+		vivos.Add(2)
 		go func() {
+			defer vivos.Done()
 			if err := receiver.Start(ctx); err != nil {
 				log.Printf("[main] receiver terminó con error: %v", err)
 			}
 		}()
 
 		replay := NewReplayWorker(cloud, queue, p.cfg.Receiver.ReplayTickSec)
-		go replay.Run(ctx)
+		go func() {
+			defer vivos.Done()
+			replay.Run(ctx)
+		}()
 
 		colaLocal = queue
 		items, bytes, oldest := queue.Stats()
@@ -112,7 +177,7 @@ func (p *program) run() {
 	}
 
 	// 5) Arrancar el loop de sync (whitelist + heartbeat + auto-config).
-	syncer := NewSyncer(cloud, p.cfg, camera, p.cfg.Poll.IntervalSeconds)
+	syncer := NewSyncer(cloud, p.cfg, camera, p.cfg.Poll.IntervalSeconds).ConEstado(estado)
 	if colaLocal != nil {
 		// Para que el panel del conjunto sepa cuánto hay represado sin que
 		// nadie tenga que entrar al computador de la portería.
@@ -130,6 +195,11 @@ func main() {
 		stopFlag      = flag.Bool("stop", false, "Detener el servicio (si está corriendo)")
 		statusFlag    = flag.Bool("status", false, "Mostrar el estado del servicio")
 		versionFlag   = flag.Bool("version", false, "Mostrar la versión del agent")
+		// Cada equipo de la portería es una copia del agente con su propio
+		// servicio: `PorteriaSyncAgent` el primero, `PorteriaSyncAgent-2` el
+		// segundo… Así la reja y el terminal corren en el mismo PC y si uno
+		// se cae no tumba al otro.
+		servicioFlag = flag.String("service-name", ServiceName, "Nombre del servicio de esta copia del agente")
 	)
 	flag.Parse()
 
@@ -155,15 +225,29 @@ func main() {
 	// Pasamos el config path resuelto como argumento para que el daemon
 	// la cargue desde el mismo lugar tras un reboot del PC.
 	exePath, _ := os.Executable()
+	servicio := strings.TrimSpace(*servicioFlag)
+	if !nombreDeServicioValido.MatchString(servicio) {
+		log.Fatalf("-service-name inválido: %q", servicio)
+	}
+	nombreVisible := ServiceDisplayName
+	if servicio != ServiceName {
+		nombreVisible += " (" + strings.TrimPrefix(servicio, ServiceName+"-") + ")"
+	}
 	svcConfig := &service.Config{
-		Name:        ServiceName,
-		DisplayName: ServiceDisplayName,
+		Name:        servicio,
+		DisplayName: nombreVisible,
 		Description: ServiceDescription,
 		Executable:  exePath,
-		Arguments:   []string{"-config", absConfigPath},
+		Arguments:   []string{"-config", absConfigPath, "-service-name", servicio},
+		// Si el proceso se cae, Windows lo vuelve a arrancar a los 5 s. Una
+		// portería sin agente es una talanquera con la lista de ayer.
+		Option: service.KeyValue{
+			"OnFailure":              "restart",
+			"OnFailureDelayDuration": "5s",
+		},
 	}
 
-	prg := &program{cfg: cfg}
+	prg := &program{cfg: cfg, configPath: absConfigPath, servicio: servicio, recarga: make(chan struct{}, 1)}
 	svc, err := service.New(prg, svcConfig)
 	if err != nil {
 		log.Fatalf("error construyendo servicio: %v", err)

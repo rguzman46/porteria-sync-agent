@@ -37,7 +37,9 @@ type Receiver struct {
 	cfg     *Config
 	queue   *FileQueue
 	server  *http.Server
+	mux     *http.ServeMux
 	maxSize int64
+	estado  *Estado
 
 	allowAny bool
 	origenes []*net.IPNet
@@ -64,6 +66,7 @@ func NewReceiver(cfg *Config, queue *FileQueue) *Receiver {
 	r := &Receiver{
 		cfg:      cfg,
 		queue:    queue,
+		mux:      mux,
 		maxSize:  MaxRequestSize,
 		allowAny: cfg.Receiver.AllowAny,
 		origenes: origenesPermitidos(cfg),
@@ -86,6 +89,16 @@ func NewReceiver(cfg *Config, queue *FileQueue) *Receiver {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	return r
+}
+
+// ConPanel monta el panel local (`/`) y anota en `estado` cuándo habla el
+// equipo. Va en el mismo puerto que las lecturas, pero solo le contesta a
+// este mismo PC (ver PanelLocal.soloEstePC).
+func (r *Receiver) ConPanel(p *PanelLocal, estado *Estado) *Receiver {
+	r.estado = estado
+	r.mux.HandleFunc("/", p.handleInicio)
+	r.mux.HandleFunc("/guardar", p.handleGuardar)
 	return r
 }
 
@@ -157,6 +170,8 @@ func (r *Receiver) soloDesdeLaCamara(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "origen no permitido", http.StatusForbidden)
 			return
 		}
+		// Para el panel local: la última vez que el equipo le habló al agente.
+		r.estado.Lectura()
 		next(w, req)
 	}
 }
