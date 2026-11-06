@@ -1,7 +1,7 @@
 # porteria-sync-agent
 
 Binario pequeño (~7 MB con `-s -w`) que corre en el PC de la portería del
-conjunto. Hace dos cosas:
+conjunto. Hace tres cosas:
 
 1. **Sincroniza las listas de placas** desde la plataforma a la cámara LPR
    local: permitidas y negadas. La cámara opera offline-first — la portería
@@ -10,6 +10,10 @@ conjunto. Hace dos cosas:
 2. **Recibe las lecturas de la cámara** (foto + placa, en el dialecto de cada
    marca) y las reenvía a la plataforma. Sin internet, encola en disco y drena
    cuando vuelve. Nada se descarta por falta de red.
+
+3. **Carga los pases en los terminales con QR** (Hikvision DS-K1T, desde la
+   v1.6.0) y sube cada lectura de QR a la plataforma (`/credential-event`).
+   Como con las placas, el terminal decide solo con su lista.
 
 ---
 
@@ -50,7 +54,7 @@ administrador**, se pega y ya:
 Set-ExecutionPolicy -Scope Process Bypass -Force
 $Token        = 'ppk_...'                          # la llave del conjunto
 $DeviceToken  = 'ppd_...'                          # el token de ESTA cámara
-$CloudUrl     = 'https://miconjunto.porteriaplus.com'
+$CloudUrl     = 'https://miconjunto.cloud.porteriaplus.com'
 $CameraType   = 'hikvision'                        # hikvision | dahua | axis
 $VendorFamily = 'hikvision_itc'                    # opcional, según el modelo
 $guion = irm "$CloudUrl/integrations/install-script.ps1"
@@ -125,14 +129,15 @@ conjunto. En una portería con cámara de entrada **y** de salida, eso significa
 que **las salidas se registran como entradas**: las visitas no se cierran y el
 conteo de quién está adentro solo crece. Todo se ve funcionando.
 
-Por eso el instalador lo pide si no viene y no deja seguir sin él. Las llaves
-`pa_…` de la plataforma anterior siguen aceptadas.
+Por eso el instalador lo pide si no viene y no deja seguir sin él. El agente
+arranca con una llave `pa_…` de la plataforma anterior, pero la plataforma
+actual solo acepta `ppk_…`.
 
 ### A mano, si hace falta
 
 ```powershell
 mkdir C:\PorteriaAgent; cd C:\PorteriaAgent
-# Descarga porteria-agent.exe de la release agent-v1.5.0 (no de latest)
+# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.0; no de latest)
 Copy-Item config.example.yaml config.yaml
 notepad config.yaml            # token, device_token, IP y credenciales de la cámara
 New-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR' -Direction Inbound -Protocol TCP -LocalPort 8787 -RemoteAddress <IP de la cámara> -Action Allow
@@ -270,7 +275,9 @@ El visitante muestra en el terminal el QR de su pase y el terminal abre solo
 Lo que hace el instalador en el terminal (el resto lo hace el agente):
 activarlo con contraseña de administrador, IP fija, encender la lectura de QR
 (viene apagada) y «Subir la foto capturada al autenticar», y en *HTTP
-Listening* poner `http://<IP del PC de la portería>:8787/acs-event`.
+Listening* poner `http://<IP del PC de la portería>:<puerto>/acs-event`, con el
+puerto que imprime el instalador: 8787 el primer equipo del PC, 8788 el
+segundo (el caso típico: la reja primero y el terminal después).
 
 ⚠️ Sin piloto: los `subEventType` de una lectura de QR, el nombre de las
 partes del evento y la hora en que el equipo lee `Valid` se confirman con el
@@ -426,7 +433,7 @@ nuevo sin reiniciar el servicio.
 Get-Content C:\PorteriaAgent\agent.log -Tail 50
 Get-Content C:\PorteriaAgent\agent.log -Wait
 curl http://localhost:8787/health
-# → {"ok":true,"agent_version":"1.5.0","queue_items":0,"queue_bytes":0,...}
+# → {"ok":true,"agent_version":"1.7.0","queue_items":0,"queue_bytes":0,...}
 ```
 
 ### Probar el receptor a mano
@@ -464,8 +471,8 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 **Compatibilidad**: una config sin `cloud.device_token` sigue funcionando (el
 cloud cae al primer dispositivo). Una sin sección `receiver:` ahora **sí**
-recibe fotos: para apagarlo hay que ponerlo explícito. Las llaves `pa_…`
-siguen aceptadas. Los campos nuevos del latido y del evento son opcionales
+recibe fotos: para apagarlo hay que ponerlo explícito. Las llaves `pa_…` las
+acepta el agente, pero la plataforma actual solo acepta `ppk_…`. Los campos nuevos del latido y del evento son opcionales
 del lado del cloud.
 
 ---
