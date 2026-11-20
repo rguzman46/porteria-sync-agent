@@ -82,6 +82,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # acelera Invoke-WebRequest 10x
 
+# TLS 1.2 encendido antes de bajar nada. Un Windows 10 sin actualizar (con
+# .NET 4.5/4.6) negocia por defecto SSL3/TLS 1.0, y GitHub y la plataforma
+# exigen TLS 1.2: la descarga falla con «No se puede crear un canal seguro
+# SSL/TLS». En un PC de portería es lo más probable. `-bor` suma, no quita lo
+# que el sistema ya tenga (TLS 1.3 donde exista).
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 # Para detenerse se usa `return`, nunca `exit`. El bloque del panel corre este
 # guion con `& ([scriptblock]::Create(...))` en la ventana de quien instala, y
 # ahí `exit` cierra la ventana entera: el técnico ve que se cierra sola y no
