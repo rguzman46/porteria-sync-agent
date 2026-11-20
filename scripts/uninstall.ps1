@@ -37,7 +37,7 @@ $principal = New-Object System.Security.Principal.WindowsPrincipal(
 if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host ""
     Write-Host "✗ Este script requiere PowerShell ejecutado como Administrador." -ForegroundColor Red
-    exit 1
+    return
 }
 
 Write-Host ""

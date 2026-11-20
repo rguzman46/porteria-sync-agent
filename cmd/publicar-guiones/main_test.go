@@ -78,6 +78,18 @@ func TestLaReleaseNoSeReconoceComoFuente(t *testing.T) {
 	}
 }
 
+// El bloque del panel corre el guion dentro de la ventana de quien instala:
+// un `exit` la cierra y el mensaje de error no se alcanza a leer.
+func TestNingunGuionCierraLaVentana(t *testing.T) {
+	instalar, desinstalar := publicarLosDeVerdad(t)
+	reExit := regexp.MustCompile(`(?mi)^[^#\r\n]*\bexit\b`)
+	for nombre, texto := range map[string]string{"install.ps1": instalar, "uninstall.ps1": desinstalar} {
+		if m := reExit.FindString(texto); m != "" {
+			t.Errorf("%s usa exit (%q): con el bloque del panel cierra la ventana; usar return", nombre, strings.TrimSpace(m))
+		}
+	}
+}
+
 func TestElInstaladorLlevaElHashDelDesinstaladorPublicado(t *testing.T) {
 	instalar, desinstalar := publicarLosDeVerdad(t)
 	suma := sha256.Sum256([]byte(desinstalar))

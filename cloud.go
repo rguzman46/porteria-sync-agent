@@ -109,8 +109,8 @@ type CloudClient struct {
 }
 
 // AgentVersion es la versión del binario. El release la inyecta desde el tag
-// (`-X main.AgentVersion=1.7.1`); este valor es el de un build local.
-var AgentVersion = "1.7.1"
+// (`-X main.AgentVersion=1.7.2`); este valor es el de un build local.
+var AgentVersion = "1.7.2"
 
 func NewCloudClient(baseURL, token string) *CloudClient {
 	return &CloudClient{
