@@ -279,7 +279,7 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	if c.Cloud.BaseURL == "" {
-		return fmt.Errorf("cloud.base_url requerido (ej: https://catamaran.porteriaplus.com)")
+		return fmt.Errorf("cloud.base_url requerido (ej: https://miconjunto.cloud.porteriaplus.com)")
 	}
 	if c.Cloud.Token == "" {
 		return fmt.Errorf("cloud.token requerido (la llave del conjunto, `ppk_…`, de Integraciones y API keys)")

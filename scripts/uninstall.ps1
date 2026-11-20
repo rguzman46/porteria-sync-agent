@@ -7,9 +7,12 @@
     Windows Defender y opcionalmente borra el directorio de instalación
     (incluyendo logs y config con secretos).
 
-    Diseñado para ser invocado one-shot desde el panel admin:
+    El instalador lo deja en C:\PorteriaAgent. En PowerShell como
+    administrador:
 
-        iex (irm 'https://catamaran.porteriaplus.com/integrations/uninstall-script.ps1')
+        powershell -ExecutionPolicy Bypass -File C:\PorteriaAgent\uninstall.ps1
+
+    Quita todos los equipos del PC (C:\PorteriaAgent y sus equipo-N).
 
 .NOTES
     Versión: __VERSION__
