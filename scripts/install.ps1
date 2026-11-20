@@ -12,8 +12,13 @@
         Set-ExecutionPolicy -Scope Process Bypass -Force
         $Token = 'ppk_...'        # la llave del conjunto
         $DeviceToken = 'ppd_...'  # el token de ESTA cámara
-        $CloudUrl = 'https://miconjunto.porteriaplus.com'
-        iex (irm "$CloudUrl/integrations/install-script.ps1")
+        $CloudUrl = 'https://miconjunto.cloud.porteriaplus.com'
+        $guion = irm "$CloudUrl/integrations/install-script.ps1"
+        & ([scriptblock]::Create($guion)) -Token $Token -DeviceToken $DeviceToken -CloudUrl $CloudUrl
+
+    O bajado de la release en GitHub, en PowerShell como administrador:
+
+        .\install.ps1 -CloudUrl https://miconjunto.cloud.porteriaplus.com
 
     El panel del conjunto arma ese bloque completo al registrar la cámara:
     se copia y se pega, no se escribe nada.
@@ -31,9 +36,9 @@
     Versión: __VERSION__
     SHA-256 esperado del binario Windows: __EXPECTED_HASH__
 
-    Este script será reemplazado por uno con el SHA real al compilarse
-    en GitHub Actions. Los placeholders `__VERSION__` y `__EXPECTED_HASH__`
-    se sustituyen en CI.
+    El guion fuente lleva marcadores que `cmd/publicar-guiones` reemplaza al
+    armar la release; el mismo paso lo deja en ASCII puro para que Windows
+    PowerShell 5.1 lo lea bien con cualquier codificación.
 #>
 
 [CmdletBinding()]
@@ -67,7 +72,11 @@ param(
     [int]$ReceiverPort = 8787,
     # De la misma release que este guion. `__VERSION__` lo sustituye CI.
     [string]$BinaryUrl = 'https://github.com/rguzman46/porteria-sync-agent/releases/download/agent-v__VERSION__/porteria-agent.exe',
-    [string]$ExpectedHash = '__EXPECTED_HASH__'
+    [string]$ExpectedHash = '__EXPECTED_HASH__',
+    # El desinstalador de la misma release: queda en C:\PorteriaAgent para que
+    # quitar el agente no dependa de volver a encontrarlo.
+    [string]$UninstallUrl = 'https://github.com/rguzman46/porteria-sync-agent/releases/download/agent-v__VERSION__/uninstall.ps1',
+    [string]$UninstallHash = '__UNINSTALL_HASH__'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -118,7 +127,12 @@ $CameraType = $CameraType.ToLower().Trim()
 
 # Un guion que no salió de una release no sabe de qué release bajar el
 # binario. Se corta acá, no se cae a `latest`.
-if ($BinaryUrl -like '*__VERSION__*') {
+#
+# No se compara contra el marcador escrito tal cual: la release lo reemplaza
+# en todo el archivo, también aquí, y la v1.7.0 quedó comparando contra su
+# propia versión y negándose a correr siempre. `agent-v` seguido de `_` solo
+# lo tiene el fuente.
+if ($BinaryUrl -like '*/agent-v_*') {
     Write-Host ""
     Write-Host "✗ Este install.ps1 no viene de una release (falta la versión)." -ForegroundColor Red
     Write-Host "  Usa el bloque que arma el panel del conjunto, o pasa -BinaryUrl con la release exacta."
@@ -146,7 +160,7 @@ while (-not $DeviceToken) {
 }
 
 while (-not $CloudUrl) {
-    $CloudUrl = Read-Host "URL del cloud (ej: https://catamaran.porteriaplus.com)"
+    $CloudUrl = Read-Host "URL del conjunto (ej: https://miconjunto.cloud.porteriaplus.com)"
     if (-not $CloudUrl.StartsWith('https://')) {
         Write-Host "  ⚠ La URL debe empezar con 'https://'" -ForegroundColor Yellow
         $CloudUrl = $null
@@ -260,7 +274,10 @@ try {
 }
 
 # Verificación de integridad SHA-256 — abortamos si el hash no coincide.
-if ($ExpectedHash -and $ExpectedHash -ne '__EXPECTED_HASH__') {
+# Se mira la forma del hash y no si sigue siendo el marcador: la release
+# también reemplaza el marcador de la comparación, y la v1.7.0 se saltaba la
+# verificación siempre.
+if ($ExpectedHash -match '^[0-9a-fA-F]{64}$') {
     Write-Host "▸ Verificando SHA-256 ..."
     $actualHash = (Get-FileHash $exePath -Algorithm SHA256).Hash.ToLower()
     $expectedLower = $ExpectedHash.ToLower()
@@ -275,6 +292,27 @@ if ($ExpectedHash -and $ExpectedHash -ne '__EXPECTED_HASH__') {
     Write-Host "  ✓ SHA-256 OK: $($actualHash.Substring(0,16))..."
 } else {
     Write-Host "  ⚠ Hash esperado no proporcionado — saltando verificación (no recomendado para prod)" -ForegroundColor Yellow
+}
+
+# El desinstalador, de la misma release y con su hash. Si falla, la
+# instalación sigue: el agente funciona igual y el desinstalador está en
+# GitHub.
+$uninstallPath = 'C:\PorteriaAgent\uninstall.ps1'
+if ($UninstallHash -match '^[0-9a-fA-F]{64}$') {
+    try {
+        $tmp = "$uninstallPath.descarga"
+        Invoke-WebRequest -Uri $UninstallUrl -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+        if ((Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower() -eq $UninstallHash.ToLower()) {
+            Move-Item $tmp $uninstallPath -Force
+        } else {
+            Remove-Item $tmp -Force
+            $uninstallPath = $null
+        }
+    } catch {
+        $uninstallPath = $null
+    }
+} else {
+    $uninstallPath = $null
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -440,8 +478,8 @@ Write-Host ""
 Write-Host "  Próximos pasos:"
 Write-Host "    1. Verifica logs:    Get-Content $InstallDir\agent.log -Tail 20"
 Write-Host "    2. Estado y datos del equipo: abre http://localhost:$ReceiverPort en este PC"
-Write-Host "    3. Panel cloud:      $CloudUrl/integrations"
-Write-Host "       (debes ver 'última sync' actualizado en pocos segundos)"
+Write-Host "    3. En el panel del conjunto: $CloudUrl/lpr"
+Write-Host "       (el equipo debe pasar a 'en línea' en un minuto)"
 Write-Host "    4. En la cámara, apunta el envío de eventos a:"
 $ipLocal = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
 if (-not $ipLocal) { $ipLocal = '<IP de este PC>' }
@@ -453,5 +491,10 @@ switch -Wildcard ($familiaOTipo) {
     default  { Write-Host "       http://${ipLocal}:$ReceiverPort/lpr-event  (HTTP Listening, multipart)" }
 }
 Write-Host ""
-Write-Host "  Para desinstalar:      iex (irm '$CloudUrl/integrations/uninstall-script.ps1')"
+if ($uninstallPath) {
+    Write-Host "  Para desinstalar (PowerShell como administrador):"
+    Write-Host "    powershell -ExecutionPolicy Bypass -File $uninstallPath"
+} else {
+    Write-Host "  Para desinstalar: uninstall.ps1 de https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v__VERSION__"
+}
 Write-Host ""

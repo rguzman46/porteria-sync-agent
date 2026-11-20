@@ -8,10 +8,10 @@ name: release
 # lleva el tag): nunca `latest`, para que una portería quede con la versión
 # que se probó contra la plataforma y no con la que se publique mañana.
 #
-# El SHA-256 del binario Windows se inyecta en `install.ps1` reemplazando
-# el placeholder `__EXPECTED_HASH__` para que el script verifique
-# integridad post-download. Sin firma de código ($300/año), el hash
-# es la mejor defensa contra binarios modificados.
+# El SHA-256 del binario Windows (y el del desinstalador) los pone en
+# `install.ps1` la herramienta `cmd/publicar-guiones`, que además deja los
+# guiones en ASCII puro. Sin firma de código ($300/año), el hash es la mejor
+# defensa contra binarios modificados.
 
 on:
   push:
@@ -48,6 +48,11 @@ jobs:
 
       - name: Go vet
         run: go vet ./...
+
+      # Incluye las de cmd/publicar-guiones: un guion que no quede en ASCII o
+      # que compare contra su propio marcador no llega a publicarse.
+      - name: Go test
+        run: go test ./...
 
       - name: Cross-compile (windows/linux/macos)
         env:
@@ -86,17 +91,18 @@ jobs:
           EOF
           cat SHA256SUMS.txt
 
-      - name: Inyectar SHA-256 + versión en install.ps1 + uninstall.ps1
+      # Versión, hashes y ASCII puro: Windows PowerShell 5.1 lee mal un UTF-8
+      # sin BOM, y la v1.7.0 bajada de GitHub no arrancaba (2026-11-20).
+      - name: Guiones publicables (install.ps1 + uninstall.ps1)
         env:
           WIN_HASH: ${{ steps.hashes.outputs.win }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          sed -e "s|__EXPECTED_HASH__|${WIN_HASH}|g" \
-              -e "s|__VERSION__|${VERSION}|g" \
-              scripts/install.ps1 > bin/install.ps1
-          sed -e "s|__VERSION__|${VERSION}|g" \
-              scripts/uninstall.ps1 > bin/uninstall.ps1
-          echo "✓ Scripts publicables generados con SHA y versión inyectados"
+          # Sin tag la versión es dev-<sha>; la herramienta exige X.Y.Z.
+          V="${VERSION}"
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || V="0.0.0"
+          go run ./cmd/publicar-guiones -version "$V" -hash "$WIN_HASH" -src scripts -out bin
+          echo "✓ Guiones publicables: ASCII, con versión y hashes"
 
       - name: Publicar release (sólo si es tag)
         if: startsWith(github.ref, 'refs/tags/agent-v')
