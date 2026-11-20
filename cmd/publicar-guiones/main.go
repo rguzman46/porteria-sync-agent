@@ -48,7 +48,7 @@ const (
 // con ella: no debe quedar en el publicado.
 var bom = string([]byte{0xEF, 0xBB, 0xBF})
 
-var reVersion =regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+var reVersion = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 var reHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func main() {
