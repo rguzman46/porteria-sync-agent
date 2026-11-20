@@ -538,7 +538,7 @@ Todo es automático menos decidir el número:
 
 | Versión | Lo que añade |
 |---|---|
-| **v1.7.4** | El instalador evita que el PC se suspenda con corriente: un PC suspendido no sincroniza la lista ni sube lecturas. `-SinCambiarEnergia` lo omite. README: qué pasa al encender, reiniciar o cortarse la luz. |
+| **v1.7.4** | El instalador evita que el PC se suspenda con corriente: un PC suspendido no sincroniza la lista ni sube lecturas. `-SinCambiarEnergia` lo omite. README: qué pasa al encender, reiniciar o cortarse la luz. |
 | **v1.7.3** | El instalador enciende TLS 1.2 antes de descargar: un Windows 10 sin actualizar negociaba TLS 1.0 y GitHub lo rechazaba («No se puede crear un canal seguro SSL/TLS»). Nada más que instalar en el PC: el agente es un solo ejecutable. |
 | **v1.7.2** | El instalador ya no cierra la ventana al detenerse: usaba `exit`, y el bloque del panel lo corre dentro de la ventana de quien instala, así que un error (o la v1.7.0 negándose a correr) la cerraba sin dejar leer el motivo. Ahora `return`, y una prueba impide volver a usar `exit`. |
 | **v1.7.1** | El instalador funciona bajado de GitHub: los guiones se publican en ASCII (`cmd/publicar-guiones`) y Windows PowerShell 5.1 ya no los rompe ni muestra «ContraseÃ±a». La v1.7.0 se negaba a correr («no viene de una release») y se saltaba la verificación del hash: la release reemplazaba también el marcador de esas dos comprobaciones; ahora miran la forma de la URL y del hash. Deja `uninstall.ps1` en `C:\PorteriaAgent` con su hash. Textos con el dominio actual y el panel en `/lpr`. La release corre `go test`. |
