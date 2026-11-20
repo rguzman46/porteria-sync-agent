@@ -82,6 +82,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # acelera Invoke-WebRequest 10x
 
+# Para detenerse se usa `return`, nunca `exit`. El bloque del panel corre este
+# guion con `& ([scriptblock]::Create(...))` en la ventana de quien instala, y
+# ahí `exit` cierra la ventana entera: el técnico ve que se cierra sola y no
+# alcanza a leer por qué (2026-11-20). `return` termina el guion y deja el
+# mensaje en pantalla, igual con `.\install.ps1`.
+
 # ─────────────────────────────────────────────────────────────────────────
 # 0. Validar elevación (Admin)
 # ─────────────────────────────────────────────────────────────────────────
@@ -94,7 +100,7 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
     Write-Host "✗ Este script requiere PowerShell ejecutado como Administrador." -ForegroundColor Red
     Write-Host "  Click derecho en PowerShell → 'Ejecutar como administrador' y vuelve a correrlo."
     Write-Host ""
-    exit 1
+    return
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -137,7 +143,7 @@ if ($BinaryUrl -like '*/agent-v_*') {
     Write-Host "✗ Este install.ps1 no viene de una release (falta la versión)." -ForegroundColor Red
     Write-Host "  Usa el bloque que arma el panel del conjunto, o pasa -BinaryUrl con la release exacta."
     Write-Host ""
-    exit 1
+    return
 }
 
 while (-not $Token) {
@@ -270,7 +276,7 @@ try {
 } catch {
     Write-Host "  ✗ Error descargando: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "    Verifica conectividad a internet o que la URL sea correcta."
-    exit 1
+    return
 }
 
 # Verificación de integridad SHA-256 — abortamos si el hash no coincide.
@@ -287,7 +293,7 @@ if ($ExpectedHash -match '^[0-9a-fA-F]{64}$') {
         Write-Host "    Recibido: $actualHash"
         Write-Host "    Aborta la instalación. El binario puede estar corrupto o modificado."
         Remove-Item $exePath -Force
-        exit 1
+        return
     }
     Write-Host "  ✓ SHA-256 OK: $($actualHash.Substring(0,16))..."
 } else {
@@ -444,7 +450,7 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 & $exePath -config $configPath -service-name $ServiceName -install
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ✗ Error registrando el servicio." -ForegroundColor Red
-    exit 1
+    return
 }
 Write-Host "  ✓ Servicio registrado como '$ServiceName'"
 

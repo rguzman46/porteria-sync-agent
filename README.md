@@ -37,9 +37,10 @@ make all
 make test
 ```
 
-El release (`.github/workflows/release.yml`, tag `agent-vX.Y.Z`) produce
-Windows amd64, Linux amd64, Linux arm64 y macOS arm64, más `install.ps1`
-con el SHA-256 y la versión inyectados.
+El release (`.github/workflows/release.yml`) produce Windows amd64, Linux
+amd64, Linux arm64 y macOS arm64, más `install.ps1` y `uninstall.ps1` en ASCII
+con la versión y los hashes inyectados. Se publica solo: ver «Sacar una
+versión» más abajo.
 
 ---
 
@@ -137,7 +138,7 @@ actual solo acepta `ppk_…`.
 
 Para el técnico que llega sin el bloque copiado: baja `install.ps1` de la
 release que fija la plataforma (hoy
-[`agent-v1.7.1`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.1)),
+[`agent-v1.7.2`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.2)),
 abre PowerShell **como administrador** en esa carpeta y:
 
 ```powershell
@@ -174,7 +175,7 @@ archivos.
 
 ```powershell
 mkdir C:\PorteriaAgent; cd C:\PorteriaAgent
-# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.1; no de latest)
+# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.2; no de latest)
 Copy-Item config.example.yaml config.yaml
 notepad config.yaml            # token, device_token, IP y credenciales de la cámara
 New-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR' -Direction Inbound -Protocol TCP -LocalPort 8787 -RemoteAddress <IP de la cámara> -Action Allow
@@ -470,7 +471,7 @@ nuevo sin reiniciar el servicio.
 Get-Content C:\PorteriaAgent\agent.log -Tail 50
 Get-Content C:\PorteriaAgent\agent.log -Wait
 curl http://localhost:8787/health
-# → {"ok":true,"agent_version":"1.7.1","queue_items":0,"queue_bytes":0,...}
+# → {"ok":true,"agent_version":"1.7.2","queue_items":0,"queue_bytes":0,...}
 ```
 
 ### Probar el receptor a mano
@@ -494,10 +495,30 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 ---
 
+## Sacar una versión
+
+Todo es automático menos decidir el número:
+
+1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.2` → `1.7.3`) y
+   agrega su fila abajo.
+2. El CI (`ci.yml`) corre en el PR: `go vet`, `go test` —que incluye las
+   pruebas de los guiones: ASCII, sin `exit`, comprobaciones que la release no
+   anula— y lee los guiones armados con **Windows PowerShell 5.1** en un
+   Windows real, como archivo y como los entrega `irm`.
+3. Al mergear, `release.yml` ve que `agent-v1.7.3` no existe y la publica:
+   compila, prueba, arma los guiones y crea el tag. Un merge sin cambio de
+   versión no publica nada.
+4. La plataforma **no** la toma sola, a propósito: una portería instala la
+   versión que se probó contra la API. Se sube con una línea,
+   `VERSION_AGENTE` en `backend/app/tenant/lpr/agente.py`, y la prueba
+   `test_la_doc_nombra_la_version_del_agente` de la plataforma exige que la
+   documentación diga la misma.
+
 ## Versionado
 
 | Versión | Lo que añade |
 |---|---|
+| **v1.7.2** | El instalador ya no cierra la ventana al detenerse: usaba `exit`, y el bloque del panel lo corre dentro de la ventana de quien instala, así que un error (o la v1.7.0 negándose a correr) la cerraba sin dejar leer el motivo. Ahora `return`, y una prueba impide volver a usar `exit`. |
 | **v1.7.1** | El instalador funciona bajado de GitHub: los guiones se publican en ASCII (`cmd/publicar-guiones`) y Windows PowerShell 5.1 ya no los rompe ni muestra «ContraseÃ±a». La v1.7.0 se negaba a correr («no viene de una release») y se saltaba la verificación del hash: la release reemplazaba también el marcador de esas dos comprobaciones; ahora miran la forma de la URL y del hash. Deja `uninstall.ps1` en `C:\PorteriaAgent` con su hash. Textos con el dominio actual y el panel en `/lpr`. La release corre `go test`. |
 | **v1.7.0** | Varios equipos en un PC (una copia por equipo: `C:\PorteriaAgent\equipo-N`, servicio `PorteriaSyncAgent-N`, puerto 8786+N; flag `-service-name`). Panel local en `http://localhost:<puerto>` con el estado y los datos del equipo; guardar valida el config completo, conserva el resto del archivo y sus permisos, recarga el agente por dentro y actualiza la regla del firewall. Windows reinicia el servicio si se cae (`OnFailure`). El instalador imprime `/acs-event` para los terminales con QR. |
 | **v1.6.0** | Lectores de credenciales (ADR-130 de la plataforma): terminales faciales Hikvision con QR (`hikvision_dsk1t_qr_camara` / `_modulo`). Carga los pases por ISAPI —un titular por pase, vigencia en hora de Bogotá, el código como tarjeta, sin tocar a los residentes— y sube sus lecturas desde `/acs-event` a `/api/v1/access/credential-event/multipart`. **Beta, sin piloto con el equipo.** |

@@ -1,0 +1,63 @@
+name: ci
+
+# Corre en cada PR y en cada push a main: lo que no pase aquí no llega a una
+# release (la release la publica `release.yml` sola al mergear una versión
+# nueva, así que este es el último punto donde un error se ve antes de que lo
+# baje una portería).
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  pruebas:
+    name: go vet + go test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+      - run: go vet ./...
+      # Incluye cmd/publicar-guiones: guiones en ASCII, sin `exit`, sin
+      # comparar contra su propio marcador y con el hash del desinstalador.
+      - run: go test ./...
+
+  # Las pruebas de Go miran el texto; esta lo lee con el PowerShell que hay en
+  # las porterías (Windows PowerShell 5.1), por los dos caminos: el archivo
+  # bajado de GitHub y el texto que entrega `irm` al bloque del panel. Así
+  # se descubrió el fallo de la v1.7.0, y así no vuelve.
+  guiones-en-windows:
+    name: Guiones con Windows PowerShell 5.1
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+      - name: Armar los guiones como en la release
+        shell: bash
+        run: |
+          VERSION="$(grep -oP 'var AgentVersion = "\K[0-9]+\.[0-9]+\.[0-9]+(?=")' cloud.go)"
+          go run ./cmd/publicar-guiones -version "$VERSION" -hash "$(printf '0%.0s' {1..64})" -src scripts -out bin
+      - name: Leerlos con Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) { throw "se esperaba Windows PowerShell 5.1, hay $($PSVersionTable.PSVersion)" }
+          $latin1 = [Text.Encoding]::GetEncoding('ISO-8859-1')
+          $fallas = 0
+          foreach ($f in 'install.ps1', 'uninstall.ps1') {
+            $ruta = Join-Path (Resolve-Path bin) $f
+            $t = $null; $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($ruta, [ref]$t, [ref]$e)
+            if ($e.Count) { $fallas++; Write-Host "::error::$f como archivo: $($e[0].Message) (línea $($e[0].Extent.StartLineNumber))" }
+            $texto = $latin1.GetString([IO.File]::ReadAllBytes($ruta))
+            [void][System.Management.Automation.Language.Parser]::ParseInput($texto, [ref]$t, [ref]$e)
+            if ($e.Count) { $fallas++; Write-Host "::error::$f como lo entrega irm: $($e[0].Message)" }
+            Write-Host "$f leído por los dos caminos"
+          }
+          if ($fallas) { exit 1 }
