@@ -90,6 +90,17 @@ func TestNingunGuionCierraLaVentana(t *testing.T) {
 	}
 }
 
+// Un Windows 10 sin actualizar negocia TLS 1.0 y GitHub lo rechaza: el
+// instalador tiene que encender TLS 1.2 antes de su primera descarga.
+func TestElInstaladorEnciendeTLS12AntesDeDescargar(t *testing.T) {
+	instalar, _ := publicarLosDeVerdad(t)
+	tls := strings.Index(instalar, "[Net.SecurityProtocolType]::Tls12")
+	descarga := strings.Index(instalar, "Invoke-WebRequest -Uri")
+	if tls < 0 || descarga < 0 || tls > descarga {
+		t.Fatal("el instalador debe encender TLS 1.2 antes del primer Invoke-WebRequest")
+	}
+}
+
 func TestElInstaladorLlevaElHashDelDesinstaladorPublicado(t *testing.T) {
 	instalar, desinstalar := publicarLosDeVerdad(t)
 	suma := sha256.Sum256([]byte(desinstalar))
