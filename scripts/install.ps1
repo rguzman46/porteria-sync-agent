@@ -70,6 +70,9 @@ param(
     # Puerto en el que el agent recibe las lecturas de la cámara. Se abre en
     # el firewall de Windows solo para la IP de la cámara.
     [int]$ReceiverPort = 8787,
+    # No tocar la energía del PC (ver «El PC no se suspende»). Solo para un PC
+    # que no es de la portería y donde alguien ya decidió cómo se suspende.
+    [switch]$SinCambiarEnergia,
     # De la misma release que este guion. `__VERSION__` lo sustituye CI.
     [string]$BinaryUrl = 'https://github.com/rguzman46/porteria-sync-agent/releases/download/agent-v__VERSION__/porteria-agent.exe',
     [string]$ExpectedHash = '__EXPECTED_HASH__',
@@ -468,6 +471,26 @@ if ($LASTEXITCODE -ne 0) {
 } else {
     Start-Sleep -Seconds 3
     Write-Host "  ✓ Servicio corriendo"
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# 7.b El PC no se suspende
+# ─────────────────────────────────────────────────────────────────────────
+# El servicio arranca solo con Windows —sin que nadie inicie sesión— y se
+# reinicia si se cae, pero un PC suspendido no corre nada: la talanquera
+# sigue abriendo con la última lista, y la lista deja de ponerse al día.
+# Solo conectado a la corriente (`-ac`): un portátil en batería sigue
+# cuidando su batería. La pantalla sí puede apagarse.
+if (-not $SinCambiarEnergia) {
+    Write-Host "▸ Evitando que el PC se suspenda con corriente..."
+    try {
+        & powercfg.exe /change standby-timeout-ac 0 | Out-Null
+        & powercfg.exe /change hibernate-timeout-ac 0 | Out-Null
+        Write-Host "  ✓ Con corriente, el PC ya no se suspende ni hiberna (la pantalla sí puede apagarse)"
+    } catch {
+        Write-Host "  ⚠ No se pudo cambiar la energía: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "    Configúralo a mano: Configuración → Sistema → Energía → Suspender: Nunca."
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────
