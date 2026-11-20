@@ -1,8 +1,13 @@
 name: release
 
-# Cross-compila el sync agent a Windows/Linux/macOS y publica los binarios
-# en una GitHub Release. Trigger: push de un tag `agent-v*` (ej. `agent-v0.1.0`)
-# o `workflow_dispatch` manual (smoke testing sin tag).
+# Publica una release del agente **sola**, al mergear a `main` un cambio de
+# `AgentVersion` en `cloud.go`: si la versión de `main` todavía no tiene su
+# tag `agent-vX.Y.Z`, se compila, se prueba y se publica con ese tag. Si ya lo
+# tiene, no hace nada. Subir de versión es cambiar esa línea en el PR; nadie
+# tiene que acordarse de etiquetar.
+#
+# También sirve un tag `agent-v*` empujado a mano (tiene que coincidir con
+# `cloud.go`) y `workflow_dispatch`, que compila sin publicar.
 #
 # El install.ps1 de cada release descarga el .exe de ESA release (la URL
 # lleva el tag): nunca `latest`, para que una portería quede con la versión
@@ -15,6 +20,8 @@ name: release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'agent-v*'
   workflow_dispatch:
@@ -36,25 +43,44 @@ jobs:
           go-version: '1.22'
           check-latest: true
 
+      # La versión sale de `cloud.go`, la misma que el binario reporta en cada
+      # latido. `publicar` dice si esta corrida crea la release.
       - name: Determinar versión
         id: version
         run: |
+          VERSION="$(grep -oP 'var AgentVersion = "\K[0-9]+\.[0-9]+\.[0-9]+(?=")' cloud.go)"
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::cloud.go no tiene AgentVersion = \"X.Y.Z\""; exit 1
+          fi
+          PUBLICAR=false
           if [[ "${GITHUB_REF}" == refs/tags/agent-v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/agent-v}"
-          else
-            VERSION="dev-$(git rev-parse --short HEAD)"
+            if [[ "${GITHUB_REF#refs/tags/agent-v}" != "$VERSION" ]]; then
+              echo "::error::el tag ${GITHUB_REF_NAME} no coincide con AgentVersion ${VERSION} de cloud.go"; exit 1
+            fi
+            PUBLICAR=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/agent-v${VERSION}" >/dev/null; then
+              echo "agent-v${VERSION} ya está publicada: nada que hacer."
+            else
+              PUBLICAR=true
+            fi
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "publicar=${PUBLICAR}" >> "$GITHUB_OUTPUT"
+          echo "versión ${VERSION}, publicar=${PUBLICAR}"
 
       - name: Go vet
+        if: steps.version.outputs.publicar == 'true' || github.event_name == 'workflow_dispatch'
         run: go vet ./...
 
       # Incluye las de cmd/publicar-guiones: un guion que no quede en ASCII o
       # que compare contra su propio marcador no llega a publicarse.
       - name: Go test
+        if: steps.version.outputs.publicar == 'true' || github.event_name == 'workflow_dispatch'
         run: go test ./...
 
       - name: Cross-compile (windows/linux/macos)
+        if: steps.version.outputs.publicar == 'true' || github.event_name == 'workflow_dispatch'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -70,6 +96,7 @@ jobs:
           ls -lah bin/
 
       - name: Calcular SHA-256
+        if: steps.version.outputs.publicar == 'true' || github.event_name == 'workflow_dispatch'
         id: hashes
         working-directory: bin
         run: |
@@ -94,21 +121,21 @@ jobs:
       # Versión, hashes y ASCII puro: Windows PowerShell 5.1 lee mal un UTF-8
       # sin BOM, y la v1.7.0 bajada de GitHub no arrancaba (2026-11-20).
       - name: Guiones publicables (install.ps1 + uninstall.ps1)
+        if: steps.version.outputs.publicar == 'true' || github.event_name == 'workflow_dispatch'
         env:
           WIN_HASH: ${{ steps.hashes.outputs.win }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # Sin tag la versión es dev-<sha>; la herramienta exige X.Y.Z.
-          V="${VERSION}"
-          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || V="0.0.0"
-          go run ./cmd/publicar-guiones -version "$V" -hash "$WIN_HASH" -src scripts -out bin
+          go run ./cmd/publicar-guiones -version "$VERSION" -hash "$WIN_HASH" -src scripts -out bin
           echo "✓ Guiones publicables: ASCII, con versión y hashes"
 
-      - name: Publicar release (sólo si es tag)
-        if: startsWith(github.ref, 'refs/tags/agent-v')
+      # Crea el tag sobre este commit si todavía no existe.
+      - name: Publicar release
+        if: steps.version.outputs.publicar == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: agent-v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: Sync Agent v${{ steps.version.outputs.version }}
           body: |
             Sync agent del Módulo LPR de Porteria Plus.
@@ -135,8 +162,8 @@ jobs:
             bin/SHA256SUMS.txt
           fail_on_unmatched_files: true
 
-      - name: Subir artefactos al run (workflow_dispatch sin tag)
-        if: ${{ !startsWith(github.ref, 'refs/tags/agent-v') }}
+      - name: Subir artefactos al run (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: sync-agent-binaries

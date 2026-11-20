@@ -37,9 +37,10 @@ make all
 make test
 ```
 
-El release (`.github/workflows/release.yml`, tag `agent-vX.Y.Z`) produce
-Windows amd64, Linux amd64, Linux arm64 y macOS arm64, más `install.ps1`
-con el SHA-256 y la versión inyectados.
+El release (`.github/workflows/release.yml`) produce Windows amd64, Linux
+amd64, Linux arm64 y macOS arm64, más `install.ps1` y `uninstall.ps1` en ASCII
+con la versión y los hashes inyectados. Se publica solo: ver «Sacar una
+versión» más abajo.
 
 ---
 
@@ -493,6 +494,25 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 `PP_URL=… PP_KEY=ppk_… PP_DEVICE=ppd_… go test -run TestContraPlataformaReal -v`.
 
 ---
+
+## Sacar una versión
+
+Todo es automático menos decidir el número:
+
+1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.2` → `1.7.3`) y
+   agrega su fila abajo.
+2. El CI (`ci.yml`) corre en el PR: `go vet`, `go test` —que incluye las
+   pruebas de los guiones: ASCII, sin `exit`, comprobaciones que la release no
+   anula— y lee los guiones armados con **Windows PowerShell 5.1** en un
+   Windows real, como archivo y como los entrega `irm`.
+3. Al mergear, `release.yml` ve que `agent-v1.7.3` no existe y la publica:
+   compila, prueba, arma los guiones y crea el tag. Un merge sin cambio de
+   versión no publica nada.
+4. La plataforma **no** la toma sola, a propósito: una portería instala la
+   versión que se probó contra la API. Se sube con una línea,
+   `VERSION_AGENTE` en `backend/app/tenant/lpr/agente.py`, y la prueba
+   `test_la_doc_nombra_la_version_del_agente` de la plataforma exige que la
+   documentación diga la misma.
 
 ## Versionado
 
