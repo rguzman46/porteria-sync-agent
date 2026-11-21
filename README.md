@@ -158,7 +158,7 @@ actual solo acepta `ppk_…`.
 
 Para el técnico que llega sin el bloque copiado: baja `install.ps1` de la
 release que fija la plataforma (hoy
-[`agent-v1.7.4`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.4)),
+[`agent-v1.7.5`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.5)),
 abre PowerShell **como administrador** en esa carpeta y:
 
 ```powershell
@@ -195,7 +195,7 @@ archivos.
 
 ```powershell
 mkdir C:\PorteriaAgent; cd C:\PorteriaAgent
-# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.4; no de latest)
+# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.5; no de latest)
 Copy-Item config.example.yaml config.yaml
 notepad config.yaml            # token, device_token, IP y credenciales de la cámara
 New-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR' -Direction Inbound -Protocol TCP -LocalPort 8787 -RemoteAddress <IP de la cámara> -Action Allow
@@ -491,7 +491,7 @@ nuevo sin reiniciar el servicio.
 Get-Content C:\PorteriaAgent\agent.log -Tail 50
 Get-Content C:\PorteriaAgent\agent.log -Wait
 curl http://localhost:8787/health
-# → {"ok":true,"agent_version":"1.7.4","queue_items":0,"queue_bytes":0,...}
+# → {"ok":true,"agent_version":"1.7.5","queue_items":0,"queue_bytes":0,...}
 ```
 
 ### Probar el receptor a mano
@@ -519,13 +519,13 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 Todo es automático menos decidir el número:
 
-1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.4` → `1.7.5`) y
+1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.5` → `1.7.6`) y
    agrega su fila abajo.
 2. El CI (`ci.yml`) corre en el PR: `go vet`, `go test` —que incluye las
    pruebas de los guiones: ASCII, sin `exit`, comprobaciones que la release no
    anula— y lee los guiones armados con **Windows PowerShell 5.1** en un
    Windows real, como archivo y como los entrega `irm`.
-3. Al mergear, `release.yml` ve que `agent-v1.7.5` no existe y la publica:
+3. Al mergear, `release.yml` ve que `agent-v1.7.6` no existe y la publica:
    compila, prueba, arma los guiones y crea el tag. Un merge sin cambio de
    versión no publica nada.
 4. La plataforma **no** la toma sola, a propósito: una portería instala la
@@ -538,6 +538,7 @@ Todo es automático menos decidir el número:
 
 | Versión | Lo que añade |
 |---|---|
+| **v1.7.5** | El panel local (`http://localhost:8787`) vuelve a guardar: con `Referrer-Policy: no-referrer` Chrome y Edge mandaban el formulario con `Origin: null` y salía siempre «el formulario no viene de esta página». Ahora la política es `same-origin`, y un `Origin: null` vale solo con `Sec-Fetch-Site: same-origin`. La ficha del formulario se sigue exigiendo. |
 | **v1.7.4** | El instalador evita que el PC se suspenda con corriente: un PC suspendido no sincroniza la lista ni sube lecturas. `-SinCambiarEnergia` lo omite. README: qué pasa al encender, reiniciar o cortarse la luz. |
 | **v1.7.3** | El instalador enciende TLS 1.2 antes de descargar: un Windows 10 sin actualizar negociaba TLS 1.0 y GitHub lo rechazaba («No se puede crear un canal seguro SSL/TLS»). Nada más que instalar en el PC: el agente es un solo ejecutable. |
 | **v1.7.2** | El instalador ya no cierra la ventana al detenerse: usaba `exit`, y el bloque del panel lo corre dentro de la ventana de quien instala, así que un error (o la v1.7.0 negándose a correr) la cerraba sin dejar leer el motivo. Ahora `return`, y una prueba impide volver a usar `exit`. |

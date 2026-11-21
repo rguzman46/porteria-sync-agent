@@ -68,9 +68,27 @@ func (p *PanelLocal) soloEstePC(w http.ResponseWriter, req *http.Request) bool {
 	h := w.Header()
 	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
+	// `same-origin` y no `no-referrer`: con `no-referrer` Chrome y Edge mandan
+	// el formulario con `Origin: null` y guardar fallaba siempre con «el
+	// formulario no viene de esta página» (2026-11-20). Hacia afuera no se
+	// filtra nada igual: la página no enlaza a ningún otro sitio.
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("Cache-Control", "no-store")
 	return true
+}
+
+// vieneDeEstaPagina: el formulario lo mandó esta misma página, no otra que
+// sepa que el panel escucha en localhost. Vale el `Origin` exacto, o —cuando
+// el navegador lo manda como `null`, que pasa con algunas políticas de
+// referer y extensiones— `Sec-Fetch-Site: same-origin`, que pone el propio
+// navegador y ninguna página puede escribir. La ficha del formulario se
+// exige además, aparte.
+func vieneDeEstaPagina(req *http.Request) bool {
+	origen := req.Header.Get("Origin")
+	if origen == "http://"+req.Host {
+		return true
+	}
+	return (origen == "" || origen == "null") && req.Header.Get("Sec-Fetch-Site") == "same-origin"
 }
 
 func (p *PanelLocal) handleInicio(w http.ResponseWriter, req *http.Request) {
@@ -92,7 +110,7 @@ func (p *PanelLocal) handleGuardar(w http.ResponseWriter, req *http.Request) {
 	if !p.soloEstePC(w, req) {
 		return
 	}
-	if origen := req.Header.Get("Origin"); origen != "http://"+req.Host {
+	if !vieneDeEstaPagina(req) {
 		http.Error(w, "el formulario no viene de esta página", http.StatusForbidden)
 		return
 	}
