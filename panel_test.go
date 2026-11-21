@@ -112,6 +112,10 @@ func TestGuardarExigeLaFichaYElOrigen(t *testing.T) {
 	if w := pedir(r, "POST", "/guardar", "127.0.0.1:5000", "localhost:8787", form, "http://malo.example"); w.Code != 403 {
 		t.Fatalf("con Origin ajeno debía ser 403, fue %d", w.Code)
 	}
+	// `Origin: null` de otra página: el navegador dice que no es del mismo sitio.
+	if w := pedirConCabeceras(r, form, map[string]string{"Origin": "null", "Sec-Fetch-Site": "cross-site"}); w.Code != 403 {
+		t.Fatalf("Origin null desde otro sitio debía ser 403, fue %d", w.Code)
+	}
 	form.Set("ficha", "otra")
 	if w := pedir(r, "POST", "/guardar", "127.0.0.1:5000", "localhost:8787", form, "http://localhost:8787"); w.Code != 403 {
 		t.Fatalf("con ficha equivocada debía ser 403, fue %d", w.Code)
@@ -123,6 +127,35 @@ func TestGuardarExigeLaFichaYElOrigen(t *testing.T) {
 	if atomic.LoadInt32(recargas) != 0 {
 		t.Fatal("un intento rechazado reinició el agente")
 	}
+}
+
+// Lo que manda de verdad Chrome o Edge desde la página del panel: `Origin:
+// null` (por la política de referer) y `Sec-Fetch-Site: same-origin`. Antes
+// esto daba «el formulario no viene de esta página» siempre (2026-11-20).
+func TestGuardarDesdeLaPaginaConOriginNull(t *testing.T) {
+	panel, r, path, _ := panelDePrueba(t)
+	form := url.Values{"ip": {"192.168.1.61"}, "puerto": {"80"}, "usuario": {"admin"}, "clave": {""}, "ficha": {panel.ficha}}
+	w := pedirConCabeceras(r, form, map[string]string{"Origin": "null", "Sec-Fetch-Site": "same-origin"})
+	if w.Code >= 400 {
+		t.Fatalf("desde la propia página debía guardar, fue %d: %s", w.Code, w.Body.String())
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "192.168.1.61") {
+		t.Fatal("no guardó la IP nueva")
+	}
+}
+
+func pedirConCabeceras(r *Receiver, form url.Values, cabeceras map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/guardar", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:5000"
+	req.Host = "localhost:8787"
+	for k, v := range cabeceras {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	r.mux.ServeHTTP(w, req)
+	return w
 }
 
 func TestGuardarCambiaElEquipoYDejaLoDemas(t *testing.T) {
