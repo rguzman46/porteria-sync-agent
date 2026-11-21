@@ -525,7 +525,7 @@ Todo es automático menos decidir el número:
    pruebas de los guiones: ASCII, sin `exit`, comprobaciones que la release no
    anula— y lee los guiones armados con **Windows PowerShell 5.1** en un
    Windows real, como archivo y como los entrega `irm`.
-3. Al mergear, `release.yml` ve que `agent-v1.7.5` no existe y la publica:
+3. Al mergear, `release.yml` ve que `agent-v1.7.6` no existe y la publica:
    compila, prueba, arma los guiones y crea el tag. Un merge sin cambio de
    versión no publica nada.
 4. La plataforma **no** la toma sola, a propósito: una portería instala la
