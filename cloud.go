@@ -110,8 +110,8 @@ type CloudClient struct {
 }
 
 // AgentVersion es la versión del binario. El release la inyecta desde el tag
-// (`-X main.AgentVersion=1.7.7`); este valor es el de un build local.
-var AgentVersion = "1.7.7"
+// (`-X main.AgentVersion=1.7.8`); este valor es el de un build local.
+var AgentVersion = "1.7.8"
 
 // ErrLlaveRechazada es el 401 de la plataforma: ya no acepta la llave de
 // este equipo. La plataforma contesta 401 solo por la llave —no existe,

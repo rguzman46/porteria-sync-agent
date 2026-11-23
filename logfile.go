@@ -109,6 +109,24 @@ func configurarLog(cfg *Config, configPath string) (io.Closer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("abriendo log %s: %w", ruta, err)
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, rot))
+	log.SetOutput(salidaDelLog{archivo: rot, consola: os.Stderr})
 	return rot, nil
+}
+
+// salidaDelLog escribe primero en el archivo y después, si puede, en la
+// consola. No es io.MultiWriter a propósito: ese se detiene en el primer
+// error, y un servicio de Windows no tiene consola, así que escribir en
+// stderr falla siempre. Con MultiWriter(os.Stderr, archivo) el agent.log
+// quedaba vacío justo donde más se necesita: instalado como servicio
+// (hasta la v1.7.7). Lo que cuenta es el archivo; la consola es un extra
+// para cuando se corre a mano.
+type salidaDelLog struct {
+	archivo io.Writer
+	consola io.Writer
+}
+
+func (s salidaDelLog) Write(p []byte) (int, error) {
+	n, err := s.archivo.Write(p)
+	_, _ = s.consola.Write(p)
+	return n, err
 }
