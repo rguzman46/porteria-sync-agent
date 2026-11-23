@@ -213,6 +213,8 @@ function Get-TokenDelConfig([string]$ruta) {
 }
 
 $ServiceName = 'PorteriaSyncAgent'
+# La carpeta que se protege (paso 2): la raíz, que cubre también equipo-N.
+$CarpetaRaiz = $InstallDir
 if (-not $PSBoundParameters.ContainsKey('InstallDir')) {
     $tokenRaiz = Get-TokenDelConfig (Join-Path $InstallDir 'config.yaml')
     if ($tokenRaiz -and $tokenRaiz -ne $DeviceToken) {
@@ -247,6 +249,60 @@ Write-Host ""
 Write-Host "▸ Preparando $InstallDir ..."
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
+}
+
+# Solo SYSTEM y Administradores. Una carpeta nueva en C:\ hereda «Usuarios
+# autenticados: Modificar», y el servicio corre como SYSTEM: cualquier
+# usuario del PC (la cuenta del portero) podía cambiar porteria-agent.exe y
+# quedarse con el equipo, alterar uninstall.ps1 antes de que lo corra un
+# administrador, o leer agent.log, que lleva placas y nombres. Se aplica en
+# cada instalación, así que volver a pegar el bloque corrige un PC viejo.
+# Dueño, herencia cortada y cada archivo de adentro reiniciado: una carpeta
+# creada antes por otro usuario no conserva sus permisos.
+function Set-PermisosDeLaCarpeta([string]$carpeta) {
+    # Solo una ruta completa, con unidad y barra: «C:» o «agente» se leerían
+    # contra la carpeta actual de la ventana.
+    if ($carpeta -notmatch '^[A-Za-z]:\\') {
+        throw "$carpeta no es una ruta completa (como C:\PorteriaAgent)"
+    }
+    $carpeta = [System.IO.Path]::GetFullPath($carpeta).TrimEnd('\')
+    # Un -InstallDir mal puesto (C:\, C:\Windows…) dejaría el disco solo para
+    # administradores. La carpeta del agente nunca es la raíz de un disco ni
+    # una del sistema.
+    $prohibidas = @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)},
+        $env:ProgramData, (Split-Path $env:PUBLIC -Parent)) |
+        Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+    if ([System.IO.Path]::GetPathRoot($carpeta).TrimEnd('\') -eq $carpeta -or $prohibidas -contains $carpeta) {
+        throw "$carpeta no puede ser la carpeta del agente; usa una propia, como C:\PorteriaAgent"
+    }
+    $acl =New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {   # SYSTEM, Administradores
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            (New-Object System.Security.Principal.SecurityIdentifier($sid)), 'FullControl',
+            'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    }
+    Set-Acl -LiteralPath $carpeta -AclObject $acl
+    if (Get-ChildItem -LiteralPath $carpeta -Force | Select-Object -First 1) {
+        & icacls.exe "$carpeta\*" /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+        & icacls.exe "$carpeta\*" /reset /T /C /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls terminó con código $LASTEXITCODE" }
+    }
+}
+try {
+    Set-PermisosDeLaCarpeta $CarpetaRaiz
+    # El desinstalador va siempre en C:\PorteriaAgent (más abajo), también
+    # con un -InstallDir propio.
+    if ((Test-Path 'C:\PorteriaAgent') -and
+        [System.IO.Path]::GetFullPath($CarpetaRaiz).TrimEnd('\') -ne 'C:\PorteriaAgent') {
+        Set-PermisosDeLaCarpeta 'C:\PorteriaAgent'
+    }
+    Write-Host "  ✓ Carpeta restringida a Administradores y SYSTEM"
+} catch {
+    Write-Host "  ✗ No se pudieron restringir los permisos de ${CarpetaRaiz}: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "    Sin eso, cualquier usuario del PC podría cambiar el agente. No se instala." -ForegroundColor Red
+    return
 }
 
 # ─────────────────────────────────────────────────────────────────────────

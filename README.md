@@ -76,7 +76,10 @@ en el historial de la shell.
 
 El guion hace, en orden:
 
-1. Crea `C:\PorteriaAgent` y agrega la exclusión de Windows Defender.
+1. Crea `C:\PorteriaAgent`, la deja **solo para Administradores y SYSTEM**
+   (dueño, herencia cortada y cada archivo de adentro reiniciado) y agrega
+   la exclusión de Windows Defender. Si no puede restringirla, no instala.
+   Ver «Permisos de la carpeta».
 2. Descarga el binario **de la misma release que el guion** (la URL lleva el
    tag; nunca `latest`) y verifica el SHA-256. Un guion que no salió de una
    release se detiene en vez de adivinar.
@@ -158,7 +161,7 @@ actual solo acepta `ppk_…`.
 
 Para el técnico que llega sin el bloque copiado: baja `install.ps1` de la
 release que fija la plataforma (hoy
-[`agent-v1.7.8`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.8)),
+[`agent-v1.7.9`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.9)),
 abre PowerShell **como administrador** en esa carpeta y:
 
 ```powershell
@@ -228,7 +231,7 @@ alguien pega como administrador.
 
 ```powershell
 mkdir C:\PorteriaAgent; cd C:\PorteriaAgent
-# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.8; no de latest)
+# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.9; no de latest)
 Copy-Item config.example.yaml config.yaml
 notepad config.yaml            # token, device_token, IP y credenciales de la cámara
 New-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR' -Direction Inbound -Protocol TCP -LocalPort 8787 -RemoteAddress <IP de la cámara> -Action Allow
@@ -270,7 +273,27 @@ Para probar con curl desde el mismo PC, agrega `127.0.0.1` a `allow_from`.
 `log.file` se escribe de verdad (además de la salida estándar, que captura el
 gestor de servicios). Relativo → junto al `config.yaml`. Rota por tamaño:
 al pasar de `max_size_mb` (10) se renombra a `.1`, `.2`… y se conservan
-`keep` (3) copias. Permisos 0600: lleva placas y nombres.
+`keep` (3) copias. Lleva placas y nombres: lo protege la carpeta, que solo
+leen Administradores y SYSTEM (el `0600` del código no cuenta en Windows).
+Para leerlo, PowerShell **como administrador**.
+
+Hasta la v1.7.7 quedaba vacío cuando el agente corría como servicio: el log
+iba a la consola y al archivo con `io.MultiWriter`, que se detiene en el
+primer error, y un servicio de Windows no tiene consola.
+
+### Permisos de la carpeta
+
+El servicio corre como **SYSTEM**. Una carpeta nueva en `C:\` hereda
+«Usuarios autenticados: Modificar», así que hasta la v1.7.8 cualquier usuario
+del PC —la cuenta del portero— podía cambiar `porteria-agent.exe` y quedarse
+con el equipo, alterar `uninstall.ps1` antes de que lo corriera un
+administrador, o leer el log y las copias `config.yaml.bak-*` (llevan la
+llave). Desde la v1.7.9 el instalador deja `C:\PorteriaAgent` y todo lo de
+adentro (también `equipo-N`) solo para Administradores y SYSTEM, con dueño
+Administradores, cada vez que corre: **volver a pegar el bloque corrige un PC
+instalado antes**. Nunca lo hace sobre la raíz de un disco, una carpeta del
+sistema o una ruta incompleta (`-InstallDir C:` se leería contra la carpeta
+de la ventana).
 
 ---
 
@@ -520,11 +543,13 @@ nuevo sin reiniciar el servicio.
 
 ## Logs y monitoreo
 
+En PowerShell como administrador (la carpeta no la lee nadie más):
+
 ```powershell
 Get-Content C:\PorteriaAgent\agent.log -Tail 50
 Get-Content C:\PorteriaAgent\agent.log -Wait
 curl http://localhost:8787/health
-# → {"ok":true,"agent_version":"1.7.8","queue_items":0,"queue_bytes":0,...}
+# → {"ok":true,"agent_version":"1.7.9","queue_items":0,"queue_bytes":0,...}
 ```
 
 ### Probar el receptor a mano
@@ -552,13 +577,13 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 Todo es automático menos decidir el número:
 
-1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.8` → `1.7.9`) y
+1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.9` → `1.7.10`) y
    agrega su fila abajo.
 2. El CI (`ci.yml`) corre en el PR: `go vet`, `go test` —que incluye las
    pruebas de los guiones: ASCII, sin `exit`, comprobaciones que la release no
    anula— y lee los guiones armados con **Windows PowerShell 5.1** en un
    Windows real, como archivo y como los entrega `irm`.
-3. Al mergear, `release.yml` ve que `agent-v1.7.9` no existe y la publica:
+3. Al mergear, `release.yml` ve que `agent-v1.7.10` no existe y la publica:
    compila, prueba, arma los guiones y crea el tag. Un merge sin cambio de
    versión no publica nada.
 4. La plataforma **no** la toma sola, a propósito: una portería instala la
@@ -571,6 +596,7 @@ Todo es automático menos decidir el número:
 
 | Versión | Lo que añade |
 |---|---|
+| **v1.7.9** | **Seguridad.** El instalador deja `C:\PorteriaAgent` solo para Administradores y SYSTEM: hasta la v1.7.8 heredaba «Usuarios autenticados: Modificar» de `C:\`, y cualquier usuario del PC podía cambiar el `.exe` que corre como SYSTEM. Volver a pegar el bloque corrige un PC ya instalado. |
 | **v1.7.8** | El `agent.log` se escribe también cuando el agente corre como servicio. Hasta la v1.7.7 quedaba vacío: el servicio de Windows no tiene consola, escribir en ella fallaba y eso cortaba la escritura al archivo. |
 | **v1.7.7** | La página local nombra todas las causas del 401: además de un equipo borrado o con token nuevo, una llave desactivada o vencida. La v1.7.6 nombraba solo las dos primeras. |
 | **v1.7.6** | Una copia del agente cuya llave ya no reconoce la plataforma (401: el equipo se borró en Cámaras de placas o se le generó un token nuevo) lo dice así en su página, no como «Sin conexión», y da la línea para quitar solo esa copia. El desinstalador acepta `-Servicio` para quitar un equipo sin tocar los demás, y al quitarlos todos limpia también las exclusiones de Defender de cada `equipo-N`. El instalador avisa de las copias huérfanas y, al terminar, da el comando para quitar solo ese equipo. |
