@@ -110,12 +110,14 @@ type CloudClient struct {
 }
 
 // AgentVersion es la versión del binario. El release la inyecta desde el tag
-// (`-X main.AgentVersion=1.7.6`); este valor es el de un build local.
-var AgentVersion = "1.7.6"
+// (`-X main.AgentVersion=1.7.7`); este valor es el de un build local.
+var AgentVersion = "1.7.7"
 
-// ErrLlaveRechazada es el 401 de la plataforma: ya no reconoce la llave de
-// este equipo. Pasa cuando lo borraron en Cámaras de placas (borrar la
-// cámara revoca su llave, ADR-135 del API) o le generaron un token nuevo.
+// ErrLlaveRechazada es el 401 de la plataforma: ya no acepta la llave de
+// este equipo. La plataforma contesta 401 solo por la llave —no existe,
+// está revocada, desactivada o vencida—; la IP no permitida es 403. En la
+// práctica: lo borraron en Cámaras de placas (borrar la cámara revoca su
+// llave, ADR-135 del API) o le generaron un token nuevo.
 // No se arregla reintentando: esta copia del agente quedó huérfana, y el
 // panel local lo dice con el comando exacto para quitarla.
 var ErrLlaveRechazada = errors.New("la plataforma rechazó la llave de este equipo (401)")

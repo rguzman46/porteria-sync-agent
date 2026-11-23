@@ -553,7 +553,7 @@ foreach ($archivo in $archivosDeEstado) {
     if ([string]$otro.servicio -notmatch '^PorteriaSyncAgent(-\d{1,3})?$') { continue }
     if ($otro.servicio -eq $ServiceName) { continue }
     Write-Host "  ⚠ $($otro.servicio) es un equipo cuya llave la plataforma ya no reconoce" -ForegroundColor Yellow
-    Write-Host "    (lo borraron en Cámaras de placas o le generaron un token nuevo)." -ForegroundColor Yellow
+    Write-Host "    (borraron el equipo en Cámaras de placas, le generaron un token nuevo o su llave se desactivó)." -ForegroundColor Yellow
     Write-Host "    Si este equipo nuevo lo reemplaza, quítalo:" -ForegroundColor Yellow
     Write-Host "    powershell -ExecutionPolicy Bypass -File $raizDelAgente\uninstall.ps1 -Servicio $($otro.servicio)" -ForegroundColor Yellow
     Write-Host ""
