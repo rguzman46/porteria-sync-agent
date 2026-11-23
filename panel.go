@@ -227,7 +227,7 @@ func vista(d DatosDelEquipo, propio bool, raiz string) vistaEquipo {
 		// No es la red: la plataforma ya no reconoce este equipo. Reintentar
 		// no lo arregla, así que se dice qué pasó y cómo se quita esta copia.
 		v.Nube = "La plataforma no reconoce este equipo"
-		v.NubeDetalle = "Lo borraron en Cámaras de placas o le generaron un token nuevo, así que su llave ya no sirve."
+		v.NubeDetalle = "Su llave ya no sirve: borraron el equipo en Cámaras de placas, le generaron un token nuevo o la llave se desactivó o venció."
 		v.Quitar = comandoParaQuitar(raiz, d.Servicio)
 	default:
 		v.Nube, v.NubeDetalle = "Sin conexión", d.NubeError
