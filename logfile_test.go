@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -57,3 +59,34 @@ func TestElLogRelativoVaJuntoAlConfig(t *testing.T) {
 		t.Errorf("el log no se creó junto al config: %v", err)
 	}
 }
+
+// Como servicio de Windows no hay consola: escribir en stderr falla. El
+// archivo tiene que recibir la línea igual (hasta la v1.7.7 quedaba vacío).
+func TestElLogLlegaAlArchivoAunqueNoHayaConsola(t *testing.T) {
+	ruta := filepath.Join(t.TempDir(), "agent.log")
+	rot, err := abrirLogRotativo(ruta, 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rot.Close()
+
+	// Así estaba hasta la v1.7.7: MultiWriter se detiene en la consola rota y
+	// el archivo no recibe nada.
+	_, _ = io.MultiWriter(consolaRota{}, rot).Write([]byte("antes\n"))
+	if data, _ := os.ReadFile(ruta); len(data) != 0 {
+		t.Fatalf("se esperaba reproducir el archivo vacío, tiene %q", data)
+	}
+
+	salida := salidaDelLog{archivo: rot, consola: consolaRota{}}
+	if _, err := salida.Write([]byte("[cloud] heartbeat ok\n")); err != nil {
+		t.Fatalf("sin consola no debía fallar: %v", err)
+	}
+	data, _ := os.ReadFile(ruta)
+	if !strings.Contains(string(data), "heartbeat ok") {
+		t.Fatalf("el archivo debía tener la línea, tiene %q", data)
+	}
+}
+
+type consolaRota struct{}
+
+func (consolaRota) Write([]byte) (int, error) { return 0, errors.New("The handle is invalid.") }
