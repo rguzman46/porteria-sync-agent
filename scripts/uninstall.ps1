@@ -14,6 +14,11 @@
 
     Quita todos los equipos del PC (C:\PorteriaAgent y sus equipo-N).
 
+    Para quitar uno solo (por ejemplo, el que se borró en la plataforma),
+    con el nombre que muestra la página del agente:
+
+        powershell -ExecutionPolicy Bypass -File C:\PorteriaAgent\uninstall.ps1 -Servicio PorteriaSyncAgent-2
+
 .NOTES
     Versión: __VERSION__
 #>
@@ -21,6 +26,8 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = 'C:\PorteriaAgent',
+    # Quita solo esta copia (PorteriaSyncAgent o PorteriaSyncAgent-N); sin él, todas.
+    [string]$Servicio = '',
     [switch]$KeepLogs,
     [switch]$KeepConfig
 )
@@ -48,83 +55,141 @@ Write-Host ""
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 1. Detener servicio (si está corriendo)
+# 1. Qué copias se quitan
 # ─────────────────────────────────────────────────────────────────────────
+# Cada equipo de la portería es una copia del agente: el primero es el
+# servicio PorteriaSyncAgent en $InstallDir; los siguientes,
+# PorteriaSyncAgent-N en $InstallDir\equipo-N (así los crea install.ps1).
+# Sin -Servicio se quitan todas; con -Servicio, solo esa, y las demás siguen
+# funcionando.
 
-# Todas las copias del agente en este PC: PorteriaSyncAgent y, si la
-# portería tiene más de un equipo, PorteriaSyncAgent-2, -3…
-$servicios = @(Get-Service -Name 'PorteriaSyncAgent*' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^PorteriaSyncAgent(-\d+)?$' })
-if ($servicios.Count -eq 0) {
-    Write-Host "▸ No había ningún servicio del agente instalado — saltando"
-}
-foreach ($svc in $servicios) {
-    if ($svc.Status -eq 'Running') {
-        Write-Host "▸ Deteniendo $($svc.Name)..."
-        Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+$formaDelNombre = '^PorteriaSyncAgent(-\d{1,3})?$'
+
+function Get-CarpetaDeCopia([string]$nombre) {
+    if ($nombre -match '^PorteriaSyncAgent-(\d{1,3})$') {
+        return (Join-Path $InstallDir "equipo-$($matches[1])")
     }
-    Write-Host "▸ Desregistrando $($svc.Name)..."
-    sc.exe delete $svc.Name | Out-Null
-    Write-Host "  ✓ Servicio eliminado"
+    return $InstallDir
 }
 
-# Las reglas del firewall que abrió el instalador, una por copia.
-Get-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR*' -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule -ErrorAction SilentlyContinue
-
-# ─────────────────────────────────────────────────────────────────────────
-# 2. Quitar exclusiones de Windows Defender
-# ─────────────────────────────────────────────────────────────────────────
-
-Write-Host "▸ Quitando exclusiones de Windows Defender..."
-try {
-    Remove-MpPreference -ExclusionPath $InstallDir -ErrorAction SilentlyContinue
-    Remove-MpPreference -ExclusionProcess "$InstallDir\porteria-agent.exe" -ErrorAction SilentlyContinue
-    Write-Host "  ✓ Exclusiones removidas"
-} catch {
-    Write-Host "  ⚠ No se pudieron quitar exclusiones: $($_.Exception.Message)" -ForegroundColor Yellow
+function Get-ReglaDeCopia([string]$nombre) {
+    # El mismo nombre que le pone install.ps1 (y `reglaDeFirewall` del agente).
+    if ($nombre -eq 'PorteriaSyncAgent') { return 'Porteria Sync Agent - receptor LPR' }
+    return "Porteria Sync Agent - receptor LPR ($nombre)"
 }
 
-# ─────────────────────────────────────────────────────────────────────────
-# 3. Borrar archivos
-# ─────────────────────────────────────────────────────────────────────────
-
-if (Test-Path $InstallDir) {
-    # Por defecto borramos TODO. Flags -KeepLogs / -KeepConfig preservan
-    # selectivamente para que el admin pueda auditar después.
-    if ($KeepLogs -or $KeepConfig) {
-        Write-Host "▸ Borrando archivos (preservando flags solicitados)..."
-        Get-ChildItem -Path $InstallDir -File | ForEach-Object {
-            $skip = $false
-            if ($KeepLogs -and $_.Extension -eq '.log') { $skip = $true }
-            if ($KeepConfig -and $_.Name -eq 'config.yaml') { $skip = $true }
-            if (-not $skip) {
-                Remove-Item $_.FullName -Force
-            }
+function Remove-CopiaDelAgente([string]$nombre) {
+    $svc = Get-Service -Name $nombre -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -ne 'Stopped') {
+            Write-Host "▸ Deteniendo $nombre..."
+            Stop-Service -Name $nombre -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
         }
-        # Si no queda nada (no flags), borra el dir entero.
-        if (-not (Get-ChildItem $InstallDir -ErrorAction SilentlyContinue)) {
-            Remove-Item $InstallDir -Recurse -Force
+        Write-Host "▸ Desregistrando $nombre..."
+        sc.exe delete $nombre | Out-Null
+        Write-Host "  ✓ Servicio eliminado"
+    } else {
+        Write-Host "▸ $nombre no estaba registrado como servicio"
+    }
+    Get-NetFirewallRule -DisplayName (Get-ReglaDeCopia $nombre) -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    $carpeta = Get-CarpetaDeCopia $nombre
+    try {
+        Remove-MpPreference -ExclusionPath $carpeta -ErrorAction SilentlyContinue
+        Remove-MpPreference -ExclusionProcess (Join-Path $carpeta 'porteria-agent.exe') -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "  ⚠ No se pudieron quitar las exclusiones de Defender: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+function Get-CopiasInstaladas {
+    # Por servicio y por carpeta: una copia a medio quitar puede tener solo
+    # una de las dos.
+    $nombres = @(Get-Service -Name 'PorteriaSyncAgent*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $formaDelNombre } | ForEach-Object { $_.Name })
+    if (Test-Path (Join-Path $InstallDir 'porteria-agent.exe')) { $nombres += 'PorteriaSyncAgent' }
+    Get-ChildItem $InstallDir -Directory -Filter 'equipo-*' -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -match '^equipo-(\d{1,3})$') { $nombres += "PorteriaSyncAgent-$($matches[1])" }
+    }
+    return @($nombres | Sort-Object -Unique)
+}
+
+function Remove-ArchivosDeCopia([string]$carpeta, [bool]$soloArchivos) {
+    # $soloArchivos: la carpeta raíz cuando quedan otras copias en sus
+    # equipo-N. Se borran sus archivos y se deja el desinstalador, que es
+    # el que usan las demás.
+    if (-not (Test-Path $carpeta)) {
+        Write-Host "▸ $carpeta no existe — nada que borrar"
+        return
+    }
+    if ($KeepLogs -or $KeepConfig -or $soloArchivos) {
+        Write-Host "▸ Borrando los archivos de $carpeta ..."
+        Get-ChildItem -Path $carpeta -File | ForEach-Object {
+            $dejar = ($KeepLogs -and $_.Extension -eq '.log') -or
+                     ($KeepConfig -and $_.Name -eq 'config.yaml') -or
+                     ($soloArchivos -and $_.Name -eq 'uninstall.ps1')
+            if (-not $dejar) { Remove-Item $_.FullName -Force }
+        }
+        if (-not (Get-ChildItem $carpeta -Force -ErrorAction SilentlyContinue)) {
+            Remove-Item $carpeta -Recurse -Force
         }
     } else {
-        Write-Host "▸ Borrando directorio $InstallDir ..."
-        Remove-Item $InstallDir -Recurse -Force
+        Write-Host "▸ Borrando $carpeta ..."
+        Remove-Item $carpeta -Recurse -Force
     }
     Write-Host "  ✓ Archivos eliminados"
+}
+
+$quedan = @()
+if ($Servicio) {
+    if ($Servicio -notmatch $formaDelNombre) {
+        Write-Host "✗ -Servicio debe ser PorteriaSyncAgent o PorteriaSyncAgent-N (N = 2, 3…)." -ForegroundColor Red
+        Write-Host "  El nombre exacto lo dice la página del agente (http://localhost:8787)."
+        return
+    }
+    $instaladas = Get-CopiasInstaladas
+    if ($instaladas -notcontains $Servicio) {
+        Write-Host "✗ En este computador no hay ninguna copia del agente llamada $Servicio." -ForegroundColor Red
+        Write-Host "  Instaladas: $($instaladas -join ', ')"
+        return
+    }
+    Remove-CopiaDelAgente $Servicio
+    $carpeta = Get-CarpetaDeCopia $Servicio
+    $quedan = @($instaladas | Where-Object { $_ -ne $Servicio })
+    # La raíz guarda las carpetas equipo-N: con otras copias vivas solo se
+    # borran sus archivos.
+    Remove-ArchivosDeCopia $carpeta (($carpeta -eq $InstallDir) -and ($quedan.Count -gt 0))
 } else {
-    Write-Host "▸ Directorio $InstallDir no existe — nada que borrar"
+    $copias = Get-CopiasInstaladas
+    if ($copias.Count -eq 0) {
+        Write-Host "▸ No había ninguna copia del agente instalada — saltando"
+    }
+    foreach ($nombre in $copias) { Remove-CopiaDelAgente $nombre }
+    # Por si quedó alguna regla de una copia que ya no existe.
+    Get-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR*' -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    Remove-ArchivosDeCopia $InstallDir $false
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-# 4. Resumen
+# 2. Resumen
 # ─────────────────────────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  ✓ DESINSTALACIÓN COMPLETA" -ForegroundColor Green
+if ($Servicio) {
+    Write-Host "  ✓ SE QUITÓ $Servicio" -ForegroundColor Green
+} else {
+    Write-Host "  ✓ DESINSTALACIÓN COMPLETA" -ForegroundColor Green
+}
 Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
+
+if ($quedan.Count -gt 0) {
+    Write-Host "  Siguen instalados en este computador: $($quedan -join ', ')"
+    Write-Host ""
+}
 
 if ($KeepConfig -or $KeepLogs) {
     Write-Host "  Archivos preservados en: $InstallDir"
@@ -133,6 +198,7 @@ if ($KeepConfig -or $KeepLogs) {
     }
 }
 
-Write-Host "  Recuerda revocar el device desde el panel admin si ya no lo usas:"
-Write-Host "    https://<tu-conjunto>.porteriaplus.com/integrations"
+Write-Host "  Si ya no usas el equipo, bórralo también en la plataforma:"
+Write-Host "    Cámaras de placas, en https://<tu-conjunto>.cloud.porteriaplus.com/lpr"
+Write-Host "  Borrarlo revoca su llave."
 Write-Host ""

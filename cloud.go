@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -109,8 +110,15 @@ type CloudClient struct {
 }
 
 // AgentVersion es la versión del binario. El release la inyecta desde el tag
-// (`-X main.AgentVersion=1.7.5`); este valor es el de un build local.
-var AgentVersion = "1.7.5"
+// (`-X main.AgentVersion=1.7.6`); este valor es el de un build local.
+var AgentVersion = "1.7.6"
+
+// ErrLlaveRechazada es el 401 de la plataforma: ya no reconoce la llave de
+// este equipo. Pasa cuando lo borraron en Cámaras de placas (borrar la
+// cámara revoca su llave, ADR-135 del API) o le generaron un token nuevo.
+// No se arregla reintentando: esta copia del agente quedó huérfana, y el
+// panel local lo dice con el comando exacto para quitarla.
+var ErrLlaveRechazada = errors.New("la plataforma rechazó la llave de este equipo (401)")
 
 func NewCloudClient(baseURL, token string) *CloudClient {
 	return &CloudClient{
@@ -175,7 +183,7 @@ func (c *CloudClient) FetchWhitelist(ctx context.Context) (*Whitelist, bool, err
 		return &wl, true, nil
 
 	case http.StatusUnauthorized:
-		return nil, false, fmt.Errorf("token inválido (401) — regenera la llave en el panel /integrations")
+		return nil, false, ErrLlaveRechazada
 
 	default:
 		// Cualquier otro código: leer un poco del body para mostrar al usuario.
@@ -275,6 +283,9 @@ func (c *CloudClient) Heartbeat(ctx context.Context, report HeartbeatReport) (*H
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("heartbeat: %w", ErrLlaveRechazada)
+	}
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("heartbeat status %d: %s", resp.StatusCode, snippet)

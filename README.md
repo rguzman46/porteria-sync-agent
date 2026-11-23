@@ -158,7 +158,7 @@ actual solo acepta `ppk_…`.
 
 Para el técnico que llega sin el bloque copiado: baja `install.ps1` de la
 release que fija la plataforma (hoy
-[`agent-v1.7.5`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.5)),
+[`agent-v1.7.6`](https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v1.7.6)),
 abre PowerShell **como administrador** en esa carpeta y:
 
 ```powershell
@@ -191,11 +191,42 @@ powershell -ExecutionPolicy Bypass -File C:\PorteriaAgent\uninstall.ps1
 Quita todos los equipos del PC. `-KeepConfig` y `-KeepLogs` conservan esos
 archivos.
 
+Para quitar **uno solo**, con el nombre de su servicio (lo muestra la página
+del agente, y el instalador lo dice al terminar):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\PorteriaAgent\uninstall.ps1 -Servicio PorteriaSyncAgent-2
+```
+
+Los demás equipos siguen funcionando. Si el que se quita es el primero
+(`PorteriaSyncAgent`), se borran sus archivos y quedan las carpetas
+`equipo-N` y el desinstalador; el próximo equipo que se instale ocupa su
+lugar en `C:\PorteriaAgent` y en el puerto 8787.
+
+### «La plataforma no reconoce este equipo» (401)
+
+La plataforma contestó 401: ya no reconoce la llave de esa copia del agente.
+Pasa cuando el equipo se borró en **Cámaras de placas** (borrarlo revoca su
+llave) o se le generó un token nuevo. Reintentar no lo arregla, así que el
+agente no lo pinta como un corte de red: la página local lo dice con esas
+palabras y muestra la línea exacta para quitar **solo esa copia**. El
+instalador, al poner un equipo nuevo, avisa de las copias que estén así.
+
+- Si el equipo ya no se usa o se reemplazó: pega esa línea.
+- Si sigue en uso con un token nuevo: quita la copia y pega el bloque nuevo
+  del panel. El instalador reconoce cada equipo por su token, así que un
+  token nuevo sin quitar la copia vieja deja dos.
+
+El nombre que va en esa línea sale del `estado.json` de cada copia; el
+panel y el instalador solo lo usan si tiene la forma
+`PorteriaSyncAgent` o `PorteriaSyncAgent-N`, porque es un comando que
+alguien pega como administrador.
+
 ### A mano, si hace falta
 
 ```powershell
 mkdir C:\PorteriaAgent; cd C:\PorteriaAgent
-# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.5; no de latest)
+# Descarga porteria-agent.exe de la release que fija la plataforma (hoy agent-v1.7.6; no de latest)
 Copy-Item config.example.yaml config.yaml
 notepad config.yaml            # token, device_token, IP y credenciales de la cámara
 New-NetFirewallRule -DisplayName 'Porteria Sync Agent - receptor LPR' -Direction Inbound -Protocol TCP -LocalPort 8787 -RemoteAddress <IP de la cámara> -Action Allow
@@ -491,7 +522,7 @@ nuevo sin reiniciar el servicio.
 Get-Content C:\PorteriaAgent\agent.log -Tail 50
 Get-Content C:\PorteriaAgent\agent.log -Wait
 curl http://localhost:8787/health
-# → {"ok":true,"agent_version":"1.7.5","queue_items":0,"queue_bytes":0,...}
+# → {"ok":true,"agent_version":"1.7.6","queue_items":0,"queue_bytes":0,...}
 ```
 
 ### Probar el receptor a mano
@@ -519,7 +550,7 @@ Contra la plataforma real (verifica los nombres de los campos del latido):
 
 Todo es automático menos decidir el número:
 
-1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.5` → `1.7.6`) y
+1. En el PR, sube `AgentVersion` en `cloud.go` (p. ej. `1.7.6` → `1.7.7`) y
    agrega su fila abajo.
 2. El CI (`ci.yml`) corre en el PR: `go vet`, `go test` —que incluye las
    pruebas de los guiones: ASCII, sin `exit`, comprobaciones que la release no
@@ -538,6 +569,7 @@ Todo es automático menos decidir el número:
 
 | Versión | Lo que añade |
 |---|---|
+| **v1.7.6** | Una copia del agente cuya llave ya no reconoce la plataforma (401: el equipo se borró en Cámaras de placas o se le generó un token nuevo) lo dice así en su página, no como «Sin conexión», y da la línea para quitar solo esa copia. El desinstalador acepta `-Servicio` para quitar un equipo sin tocar los demás, y al quitarlos todos limpia también las exclusiones de Defender de cada `equipo-N`. El instalador avisa de las copias huérfanas y, al terminar, da el comando para quitar solo ese equipo. |
 | **v1.7.5** | El panel local (`http://localhost:8787`) vuelve a guardar: con `Referrer-Policy: no-referrer` Chrome y Edge mandaban el formulario con `Origin: null` y salía siempre «el formulario no viene de esta página». Ahora la política es `same-origin`, y un `Origin: null` vale solo con `Sec-Fetch-Site: same-origin`. La ficha del formulario se sigue exigiendo. |
 | **v1.7.4** | El instalador evita que el PC se suspenda con corriente: un PC suspendido no sincroniza la lista ni sube lecturas. `-SinCambiarEnergia` lo omite. README: qué pasa al encender, reiniciar o cortarse la luz. |
 | **v1.7.3** | El instalador enciende TLS 1.2 antes de descargar: un Windows 10 sin actualizar negociaba TLS 1.0 y GitHub lo rechazaba («No se puede crear un canal seguro SSL/TLS»). Nada más que instalar en el PC: el agente es un solo ejecutable. |

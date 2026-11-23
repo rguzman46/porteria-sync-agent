@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +36,9 @@ type DatosDelEquipo struct {
 	NubeOK    *bool     `json:"nube_ok,omitempty"`
 	NubeError string    `json:"nube_error,omitempty"`
 	NubeEn    time.Time `json:"nube_en,omitempty"`
+	// LlaveRechazada: la plataforma contestó 401 (ErrLlaveRechazada). Va en
+	// estado.json para que el panel de otra copia y el instalador lo vean.
+	LlaveRechazada bool `json:"llave_rechazada,omitempty"`
 
 	EquipoOK    *bool     `json:"equipo_ok,omitempty"`
 	EquipoError string    `json:"equipo_error,omitempty"`
@@ -84,6 +88,7 @@ func (e *Estado) Nube(err error) {
 	e.mu.Lock()
 	ok := err == nil
 	e.d.NubeOK, e.d.NubeEn, e.d.NubeError = &ok, time.Now(), ""
+	e.d.LlaveRechazada = errors.Is(err, ErrLlaveRechazada)
 	if err != nil {
 		e.d.NubeError = err.Error()
 	}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -188,9 +189,29 @@ type vistaEquipo struct {
 	Lectura                             string
 	Propio                              bool
 	Enlace                              string
+	// Quitar es el comando para desinstalar solo esta copia, cuando la
+	// plataforma ya no reconoce su llave. Vacío en cualquier otro caso.
+	Quitar string
 }
 
-func vista(d DatosDelEquipo, propio bool) vistaEquipo {
+// nombreDeServicio es la forma que les da el instalador a las copias del
+// agente. El nombre sale de estado.json, que otra copia escribe: solo se
+// pone en un comando para pegar como administrador si tiene esta forma.
+var nombreDeServicio = regexp.MustCompile(`^PorteriaSyncAgent(-[0-9]{1,3})?$`)
+
+// comandoParaQuitar es la línea que quita solo la copia `servicio`, con el
+// desinstalador que el instalador deja en la carpeta raíz (`raiz`).
+func comandoParaQuitar(raiz, servicio string) string {
+	if !nombreDeServicio.MatchString(servicio) || raiz == "" {
+		return ""
+	}
+	return fmt.Sprintf(`powershell -ExecutionPolicy Bypass -File "%s" -Servicio %s`,
+		filepath.Join(raiz, "uninstall.ps1"), servicio)
+}
+
+// vista arma lo que se pinta de una copia. `raiz` es la carpeta donde el
+// instalador dejó el desinstalador (C:\PorteriaAgent).
+func vista(d DatosDelEquipo, propio bool, raiz string) vistaEquipo {
 	v := vistaEquipo{
 		Nombre: nombreDelEquipo(d.Equipo), Puerto: d.Puerto, IP: d.IP,
 		Version: d.Version, Modelo: d.Modelo, Propio: propio,
@@ -202,6 +223,12 @@ func vista(d DatosDelEquipo, propio bool) vistaEquipo {
 	case *d.NubeOK:
 		v.Nube, v.NubeOK = "Conectado", true
 		v.NubeDetalle = hace(d.NubeEn)
+	case d.LlaveRechazada:
+		// No es la red: la plataforma ya no reconoce este equipo. Reintentar
+		// no lo arregla, así que se dice qué pasó y cómo se quita esta copia.
+		v.Nube = "La plataforma no reconoce este equipo"
+		v.NubeDetalle = "Lo borraron en Cámaras de placas o le generaron un token nuevo, así que su llave ya no sirve."
+		v.Quitar = comandoParaQuitar(raiz, d.Servicio)
 	default:
 		v.Nube, v.NubeDetalle = "Sin conexión", d.NubeError
 	}
@@ -256,8 +283,9 @@ func hace(t time.Time) string {
 }
 
 func (p *PanelLocal) pintar(w http.ResponseWriter, status int, aviso, falla string) {
+	raiz := carpetaRaiz(filepath.Dir(p.configPath))
 	datos := map[string]any{
-		"Propio":  vista(p.estado.Copia(), true),
+		"Propio":  vista(p.estado.Copia(), true, raiz),
 		"Otros":   []vistaEquipo{},
 		"IP":      p.cfg.Camera.Host,
 		"Puerto":  p.cfg.Camera.Port,
@@ -269,7 +297,7 @@ func (p *PanelLocal) pintar(w http.ResponseWriter, status int, aviso, falla stri
 	}
 	var otros []vistaEquipo
 	for _, d := range otrasCopias(filepath.Dir(p.configPath)) {
-		otros = append(otros, vista(d, false))
+		otros = append(otros, vista(d, false, raiz))
 	}
 	datos["Otros"] = otros
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -304,6 +332,8 @@ button{margin-top:18px;width:100%;padding:12px;border:0;border-radius:10px;backg
 .aviso{background:var(--okf);color:var(--ok);border-radius:10px;padding:12px;margin-bottom:16px}
 .falla{background:var(--malf);color:var(--mal);border-radius:10px;padding:12px;margin-bottom:16px}
 a{color:var(--marca)}
+.quitar{background:var(--malf);border-radius:10px;padding:12px;margin-top:8px;font-size:14px}
+.quitar p{margin:0 0 8px}.quitar code{display:block;background:#fff;border:1px solid var(--borde);border-radius:8px;padding:8px;font:13px ui-monospace,Consolas,monospace;word-break:break-all;user-select:all}
 </style></head><body><main>
 <h1>Agente de portería</h1>
 <p class="sub">Portería Plus · versión {{.Version}} · esta página solo se abre desde este computador</p>
@@ -312,6 +342,7 @@ a{color:var(--marca)}
 {{with .Propio}}
 <section class="tarjeta"><h2>{{.Nombre}}{{if .Modelo}} · {{.Modelo}}{{end}}</h2>
 <div class="fila"><span>Plataforma</span><span><i class="punto {{if .NubeOK}}ok{{else}}mal{{end}}"></i>{{.Nube}}<span class="detalle">{{.NubeDetalle}}</span></span></div>
+{{if .Quitar}}<div class="quitar"><p>Si este equipo ya no se usa, o lo reemplazaste por otro, quita esta copia del agente: abre PowerShell <b>como administrador</b> y pega esta línea. Los demás equipos de este computador siguen funcionando.</p><code>{{.Quitar}}</code><p class="ayuda">Si el equipo sigue en uso, después pega el bloque nuevo que da el panel en Cámaras de placas.</p></div>{{end}}
 <div class="fila"><span>Equipo ({{.IP}})</span><span><i class="punto {{if .EquipoOK}}ok{{else}}mal{{end}}"></i>{{.Equipo}}<span class="detalle">{{.EquipoDetalle}}</span></span></div>
 <div class="fila"><span>Último aviso del equipo</span><span>{{.Lectura}}</span></div>
 <div class="fila"><span>Puerto de este agente</span><span>{{.Puerto}}</span></div>
@@ -334,6 +365,7 @@ a{color:var(--marca)}
 {{if .Otros}}<h2>Otros equipos en este computador</h2>
 {{range .Otros}}<section class="tarjeta"><h2>{{.Nombre}}{{if .Modelo}} · {{.Modelo}}{{end}}</h2>
 <div class="fila"><span>Plataforma</span><span><i class="punto {{if .NubeOK}}ok{{else}}mal{{end}}"></i>{{.Nube}}<span class="detalle">{{.NubeDetalle}}</span></span></div>
+{{if .Quitar}}<div class="quitar"><p>Si este equipo ya no se usa, o lo reemplazaste por otro, quita esta copia del agente: abre PowerShell <b>como administrador</b> y pega esta línea. Los demás equipos de este computador siguen funcionando.</p><code>{{.Quitar}}</code><p class="ayuda">Si el equipo sigue en uso, después pega el bloque nuevo que da el panel en Cámaras de placas.</p></div>{{end}}
 <div class="fila"><span>Equipo ({{.IP}})</span><span><i class="punto {{if .EquipoOK}}ok{{else}}mal{{end}}"></i>{{.Equipo}}<span class="detalle">{{.EquipoDetalle}}</span></span></div>
 <div class="fila"><span>Último aviso del equipo</span><span>{{.Lectura}}</span></div>
 <div class="fila"><span>Para cambiar sus datos</span><span><a href="{{.Enlace}}">{{.Enlace}}</a></span></div>
