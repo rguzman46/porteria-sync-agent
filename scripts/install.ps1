@@ -528,9 +528,33 @@ switch -Wildcard ($familiaOTipo) {
 }
 Write-Host ""
 if ($uninstallPath) {
-    Write-Host "  Para desinstalar (PowerShell como administrador):"
+    Write-Host "  Para quitar solo este equipo (PowerShell como administrador):"
+    Write-Host "    powershell -ExecutionPolicy Bypass -File $uninstallPath -Servicio $ServiceName"
+    Write-Host "  Para quitar todos los equipos de este computador:"
     Write-Host "    powershell -ExecutionPolicy Bypass -File $uninstallPath"
 } else {
     Write-Host "  Para desinstalar: uninstall.ps1 de https://github.com/rguzman46/porteria-sync-agent/releases/tag/agent-v__VERSION__"
 }
 Write-Host ""
+
+# Copias huérfanas: la plataforma ya no reconoce su llave (las borraron en
+# Cámaras de placas o les generaron un token nuevo) y se quedan dando 401.
+# El agente lo anota en su estado.json (`llave_rechazada`). No se quitan
+# solas —un 401 se revisa antes de borrar nada—: se avisa con el comando.
+# Del estado.json solo se usa un nombre con la forma del instalador.
+$raizDelAgente = 'C:\PorteriaAgent'
+$archivosDeEstado = @(Join-Path $raizDelAgente 'estado.json') +
+    @(Get-ChildItem $raizDelAgente -Directory -Filter 'equipo-*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName 'estado.json' })
+foreach ($archivo in $archivosDeEstado) {
+    if (-not (Test-Path $archivo)) { continue }
+    try { $otro = Get-Content $archivo -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
+    if ($otro.llave_rechazada -ne $true) { continue }
+    if ([string]$otro.servicio -notmatch '^PorteriaSyncAgent(-\d{1,3})?$') { continue }
+    if ($otro.servicio -eq $ServiceName) { continue }
+    Write-Host "  ⚠ $($otro.servicio) es un equipo cuya llave la plataforma ya no reconoce" -ForegroundColor Yellow
+    Write-Host "    (lo borraron en Cámaras de placas o le generaron un token nuevo)." -ForegroundColor Yellow
+    Write-Host "    Si este equipo nuevo lo reemplaza, quítalo:" -ForegroundColor Yellow
+    Write-Host "    powershell -ExecutionPolicy Bypass -File $raizDelAgente\uninstall.ps1 -Servicio $($otro.servicio)" -ForegroundColor Yellow
+    Write-Host ""
+}
